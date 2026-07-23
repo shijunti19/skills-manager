@@ -3,7 +3,7 @@ import {
   Folder,
   ChevronDown,
   ChevronUp,
-  Github,
+  GitFork as Github,
   HardDrive,
   Globe,
 } from "lucide-react";

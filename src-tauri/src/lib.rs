@@ -955,6 +955,7 @@ pub fn run() {
             commands::tools::reset_custom_tool_project_path,
             commands::tools::add_custom_tool,
             commands::tools::remove_custom_tool,
+            commands::tools::set_tool_prompt_spec,
             // Skills
             commands::skills::get_managed_skills,
             commands::skills::get_skills_for_preset,
@@ -982,11 +983,21 @@ pub fn run() {
             commands::skills::delete_tag,
             commands::skills::cancel_install,
             commands::skills::batch_import_folder,
+            // Smart Tags
+            commands::smart_tags::get_smart_tags_ext,
+            commands::smart_tags::get_smart_tags_map,
+            commands::smart_tags::create_smart_tag_ext,
+            commands::smart_tags::update_smart_tag_ext,
+            commands::smart_tags::delete_smart_tag_ext,
+            commands::smart_tags::get_smart_tag_ids_for_skill,
+            commands::smart_tags::bind_smart_tags_to_skill,
+            commands::smart_tags::unbind_smart_tags_from_skill,
             // Sync
             commands::sync::sync_skill_to_tool,
             commands::sync::unsync_skill_from_tool,
             commands::sync::get_skill_tool_toggles,
             commands::sync::set_skill_tool_toggle,
+            commands::sync::organize_agent_skills,
             // Scan
             commands::scan::scan_local_skills,
             commands::scan::import_existing_skill,

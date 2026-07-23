@@ -19,6 +19,10 @@ pub struct ToolInfo {
     pub project_relative_skills_dir: Option<String>,
     pub has_project_path_override: bool,
     pub category: ToolCategory,
+    /// Prompt template for this agent (`{{name}}`/`{{path}}` placeholders).
+    /// `None` means "use the global default". Resolved here by merging
+    /// per-tool overrides (custom tool def or `tool_prompt_specs` settings map).
+    pub skills_prompt_spec: Option<String>,
 }
 
 pub fn get_disabled_tools(store: &SkillStore) -> Vec<String> {
@@ -162,6 +166,58 @@ pub fn set_custom_tools(store: &SkillStore, custom_tools: &[CustomToolDef]) -> R
         .map_err(AppError::db)
 }
 
+/// Read the built-in agents' prompt-spec overrides (key -> spec template).
+pub fn get_tool_prompt_specs(store: &SkillStore) -> HashMap<String, String> {
+    store
+        .get_setting("tool_prompt_specs")
+        .ok()
+        .flatten()
+        .and_then(|json| serde_json::from_str::<HashMap<String, String>>(&json).ok())
+        .unwrap_or_default()
+}
+
+/// Persist the built-in agents' prompt-spec overrides map.
+pub fn set_tool_prompt_specs(
+    store: &SkillStore,
+    specs: &HashMap<String, String>,
+) -> Result<(), AppError> {
+    let json = serde_json::to_string(specs)
+        .map_err(|e| AppError::internal(format!("Failed to serialize: {e}")))?;
+    store
+        .set_setting("tool_prompt_specs", &json)
+        .map_err(AppError::db)
+}
+
+/// Set the prompt-spec override for a single agent (built-in or custom).
+/// For custom tools, the value is written onto the CustomToolDef; for built-in
+/// tools, onto the `tool_prompt_specs` settings map. An empty/blank spec clears
+/// the override (so the global default applies).
+pub fn set_tool_prompt_spec(
+    store: &SkillStore,
+    key: &str,
+    spec: Option<&str>,
+) -> Result<(), AppError> {
+    let trimmed = spec.map(str::trim).filter(|s| !s.is_empty());
+    // Custom tools: mutate the stored CustomToolDef.
+    let mut customs = get_custom_tools(store);
+    let custom_match = customs.iter_mut().find(|c| c.key == key);
+    if let Some(def) = custom_match {
+        def.skills_prompt_spec = trimmed.map(str::to_string);
+        return set_custom_tools(store, &customs);
+    }
+    // Built-in tools: update the tool_prompt_specs map.
+    let mut specs = get_tool_prompt_specs(store);
+    match trimmed {
+        Some(s) => {
+            specs.insert(key.to_string(), s.to_string());
+        }
+        None => {
+            specs.remove(key);
+        }
+    }
+    set_tool_prompt_specs(store, &specs)
+}
+
 pub fn normalize_skills_dir_input(path: &str) -> Result<String, AppError> {
     let raw = path.trim();
     if raw.is_empty() {
@@ -215,29 +271,44 @@ pub fn normalize_project_relative_skills_dir_input(path: &str) -> Result<Option<
 pub fn list_tool_info(store: &SkillStore) -> Vec<ToolInfo> {
     let disabled = disabled_tools_set(store);
     let project_overrides = get_custom_tool_project_paths(store);
+    // Resolve per-agent prompt specs: custom tools carry it on their def;
+    // built-in agents read overrides from the `tool_prompt_specs` settings map.
+    let custom_specs: HashMap<String, Option<String>> = get_custom_tools(store)
+        .into_iter()
+        .map(|def| (def.key, def.skills_prompt_spec))
+        .collect();
+    let builtin_specs = get_tool_prompt_specs(store);
     let infos: Vec<ToolInfo> = tool_adapters::all_tool_adapters(store)
         .into_iter()
-        .map(|adapter| ToolInfo {
-            key: adapter.key.clone(),
-            display_name: adapter.display_name.clone(),
-            installed: adapter.is_installed(),
-            skills_dir: adapter.skills_dir().to_string_lossy().to_string(),
-            enabled: !disabled.contains(&adapter.key),
-            is_custom: adapter.is_custom,
-            has_path_override: adapter.has_path_override(),
-            project_relative_skills_dir: {
-                let project_dir = adapter.project_relative_skills_dir();
-                if project_dir.is_empty() {
-                    None
-                } else {
-                    Some(project_dir.to_string())
-                }
-            },
-            // Only built-in adapters have a default project path to reset back to;
-            // custom tools clear their path instead of resetting.
-            has_project_path_override: !adapter.is_custom
-                && project_overrides.contains_key(&adapter.key),
-            category: adapter.category,
+        .map(|adapter| {
+            let prompt_spec = if adapter.is_custom {
+                custom_specs.get(&adapter.key).cloned().flatten()
+            } else {
+                builtin_specs.get(&adapter.key).cloned()
+            };
+            ToolInfo {
+                key: adapter.key.clone(),
+                display_name: adapter.display_name.clone(),
+                installed: adapter.is_installed(),
+                skills_dir: adapter.skills_dir().to_string_lossy().to_string(),
+                enabled: !disabled.contains(&adapter.key),
+                is_custom: adapter.is_custom,
+                has_path_override: adapter.has_path_override(),
+                project_relative_skills_dir: {
+                    let project_dir = adapter.project_relative_skills_dir();
+                    if project_dir.is_empty() {
+                        None
+                    } else {
+                        Some(project_dir.to_string())
+                    }
+                },
+                // Only built-in adapters have a default project path to reset back to;
+                // custom tools clear their path instead of resetting.
+                has_project_path_override: !adapter.is_custom
+                    && project_overrides.contains_key(&adapter.key),
+                category: adapter.category,
+                skills_prompt_spec: prompt_spec,
+            }
         })
         .collect();
 

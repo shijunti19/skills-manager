@@ -2,7 +2,7 @@ import { useState, useEffect, useLayoutEffect, useCallback, useRef, useMemo, use
 import {
   DownloadCloud,
   UploadCloud,
-  Github,
+  GitFork as Github,
   Box,
   Star,
   TrendingUp,

@@ -1,23 +1,31 @@
 use anyhow::{bail, Context, Result};
-use rusqlite::Connection;
+use rusqlite::{params, Connection};
 
 /// Current schema version. Bump this when adding a new migration.
-const LATEST_VERSION: u32 = 7;
+const LATEST_VERSION: u32 = 8;
 
 /// Run all pending migrations on the database.
 ///
 /// - New databases: creates full schema and sets version to LATEST_VERSION.
 /// - Existing databases (user_version == 0): runs incremental migrations
 ///   to bring them up to date.
-/// - Databases newer than this app version: returns an error.
+/// - Databases newer than this app version: tolerated forward-compatibly.
+///   The user may have run a newer build (e.g. a since-reverted feature
+///   branch that already created tables). We run the idempotent "ensure"
+///   passes below so any columns THIS version expects are present, then
+///   proceed without bumping the version down. This avoids a hard failure
+///   that would lock the user out of their data.
 pub fn run_migrations(conn: &Connection) -> Result<()> {
     let current: u32 = conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
 
     if current > LATEST_VERSION {
-        bail!(
-            "Database schema version ({current}) is newer than this app supports ({LATEST_VERSION}). \
-             Please upgrade the application."
+        log::warn!(
+            "Database schema version ({current}) is newer than this app supports \
+             ({LATEST_VERSION}). Running forward-compat ensure passes and continuing."
         );
+        // Still run the ensure passes so any columns this version needs exist.
+        run_ensure_passes(conn)?;
+        return Ok(());
     }
 
     if current == LATEST_VERSION {
@@ -54,6 +62,7 @@ fn migrate_step(conn: &Connection, from_version: u32) -> Result<()> {
         4 => migrate_v4_to_v5(conn),
         5 => migrate_v5_to_v6(conn),
         6 => migrate_v6_to_v7(conn),
+        7 => migrate_v7_to_v8(conn),
         _ => bail!("unknown migration version: {from_version}"),
     }
 }
@@ -294,6 +303,64 @@ fn migrate_v6_to_v7(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
+/// v7 → v8: Smart Tag system (multi-tag classification + per-tag prompt).
+///
+/// `smart_tags` stores named tag groups (e.g. "⚙️ Rust 系统开发") with an
+/// optional `prompt` that is appended when generating a combined prompt.
+/// `agents` is a JSON array (kept as TEXT) — empty array means the tag is
+/// global (shown on every agent page). `skill_smart_tag_relations` is the
+/// many-to-many join between skills and smart tags.
+///
+/// Uses `IF NOT EXISTS` + `add_column_if_missing` so it is safe to run on a
+/// database that a previous (since-reverted) build already created these
+/// tables in — it only adds any missing columns (notably `sort_order`).
+fn migrate_v7_to_v8(conn: &Connection) -> Result<()> {
+    conn.execute_batch(
+        "
+        CREATE TABLE IF NOT EXISTS smart_tags (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL UNIQUE,
+            agents TEXT NOT NULL DEFAULT '[]',
+            description TEXT,
+            prompt TEXT,
+            sort_order INTEGER NOT NULL DEFAULT 0,
+            created_at INTEGER,
+            updated_at INTEGER
+        );
+
+        CREATE TABLE IF NOT EXISTS skill_smart_tag_relations (
+            skill_id TEXT NOT NULL REFERENCES skills(id) ON DELETE CASCADE,
+            smart_tag_id TEXT NOT NULL REFERENCES smart_tags(id) ON DELETE CASCADE,
+            PRIMARY KEY(skill_id, smart_tag_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_smart_tag_relations_tag
+            ON skill_smart_tag_relations(smart_tag_id);
+        ",
+    )?;
+    // Forward-compat: a pre-existing smart_tags table (from a newer build)
+    // may lack `sort_order` and these columns. add_column_if_missing is a
+    // no-op when the column already exists.
+    add_column_if_missing(conn, "smart_tags", "sort_order", "INTEGER NOT NULL DEFAULT 0")?;
+    add_column_if_missing(conn, "smart_tags", "description", "TEXT")?;
+    add_column_if_missing(conn, "smart_tags", "prompt", "TEXT")?;
+    add_column_if_missing(conn, "smart_tags", "agents", "TEXT NOT NULL DEFAULT '[]'")?;
+    Ok(())
+}
+
+/// Idempotent "ensure" passes for databases that come from a newer app
+/// version (current > LATEST_VERSION). Makes sure every column THIS version's
+/// code reads/writes exists, without touching the schema version number.
+fn run_ensure_passes(conn: &Connection) -> Result<()> {
+    // Ensure the smart_tags table family exists with our expected columns.
+    if has_table(conn, "smart_tags")? {
+        add_column_if_missing(conn, "smart_tags", "sort_order", "INTEGER NOT NULL DEFAULT 0")?;
+        add_column_if_missing(conn, "smart_tags", "description", "TEXT")?;
+        add_column_if_missing(conn, "smart_tags", "prompt", "TEXT")?;
+        add_column_if_missing(conn, "smart_tags", "agents", "TEXT NOT NULL DEFAULT '[]'")?;
+    }
+    Ok(())
+}
+
 // ── Helpers ──
 
 fn add_column_if_missing(
@@ -328,6 +395,14 @@ fn has_column(conn: &Connection, table: &str, column: &str) -> Result<bool> {
         .query_map([], |row| row.get::<_, String>(1))?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     Ok(columns.iter().any(|name| name == column))
+}
+
+fn has_table(conn: &Connection, table: &str) -> Result<bool> {
+    validate_identifier(table)?;
+    let mut stmt = conn.prepare(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name = ?1",
+    )?;
+    Ok(stmt.exists(params![table])?)
 }
 
 #[cfg(test)]

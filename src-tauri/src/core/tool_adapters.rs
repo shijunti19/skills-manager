@@ -56,6 +56,10 @@ pub struct CustomToolDef {
     pub project_relative_skills_dir: Option<String>,
     #[serde(default)]
     pub category: ToolCategory,
+    /// Prompt template for this custom agent (`{{name}}`/`{{path}}` placeholders).
+    /// Stored alongside the tool definition in settings.
+    #[serde(default)]
+    pub skills_prompt_spec: Option<String>,
 }
 
 impl ToolAdapter {

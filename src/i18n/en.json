@@ -1055,5 +1055,37 @@
         "diverged": "Conflict"
       }
     }
+  },
+  "promptPreview": {
+    "title": "Generated Prompt",
+    "subtitle": "Send this to an AI agent to invoke the listed skills",
+    "generatedLabel": "Prompt content",
+    "taskLabel": "Your task (optional)",
+    "taskPlaceholder": "Describe what you want to do — appended to the prompt…",
+    "cacheHint": "Task text is cached locally",
+    "regenerate": "Regenerate",
+    "copyAll": "Copy all",
+    "copied": "Copied",
+    "copyFailed": "Copy failed",
+    "generate": "Generate",
+    "selectTagFirst": "Select a tag first",
+    "noMatchingSkills": "No skills under this tag",
+    "synced": "Synced",
+    "notInstalled": "Not installed",
+    "sync": "Sync",
+    "syncToAgent": "Sync to {{agent}}",
+    "syncAllToAgent": "Sync all to {{agent}}",
+    "syncedToast": "Synced to {{agent}}",
+    "syncAllDone": "Organized {{agent}}: kept {{kept}}, removed {{removed}}",
+    "syncAllFailed": "Sync failed",
+    "clearFilter": "Show all",
+    "tagFilteredSummary": "{{count}} skills",
+    "filterByTag": "Filter by tag",
+    "selectTagHint": "Select a tag to filter skills",
+    "matchedSkills": "{{count}} matching skills",
+    "promptSpecTitle": "Skill prompt spec",
+    "promptSpecPlaceholder": "[]((path))  —  how skills are referenced. Use {{name}} and {{path}}",
+    "promptSpecDesc": "Controls how skills are referenced in generated prompts. Empty = default [](path).",
+    "promptSpecSaved": "Prompt spec saved"
   }
 }

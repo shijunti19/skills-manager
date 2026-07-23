@@ -31,6 +31,7 @@ pub struct ToolInfoDto {
     pub project_relative_skills_dir: Option<String>,
     pub has_project_path_override: bool,
     pub category: ToolCategory,
+    pub skills_prompt_spec: Option<String>,
 }
 
 /// Sync active scenario skills to a single tool.
@@ -80,6 +81,7 @@ pub async fn get_tool_status(
                 project_relative_skills_dir: info.project_relative_skills_dir,
                 has_project_path_override: info.has_project_path_override,
                 category: info.category,
+                skills_prompt_spec: info.skills_prompt_spec,
             })
             .collect();
         let elapsed_ms = start.elapsed().as_millis();
@@ -314,6 +316,7 @@ pub async fn add_custom_tool(
     display_name: String,
     skills_dir: String,
     project_relative_skills_dir: Option<String>,
+    skills_prompt_spec: Option<String>,
     store: State<'_, Arc<SkillStore>>,
 ) -> Result<(), AppError> {
     let store = store.inner().clone();
@@ -337,6 +340,9 @@ pub async fn add_custom_tool(
                 "Agent key \"{key}\" already exists"
             )));
         }
+        let skills_prompt_spec = skills_prompt_spec
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
         let mut customs = get_custom_tools(&store);
         customs.push(CustomToolDef {
             key: key.clone(),
@@ -344,10 +350,26 @@ pub async fn add_custom_tool(
             skills_dir,
             project_relative_skills_dir,
             category: Default::default(),
+            skills_prompt_spec,
         });
         set_custom_tools(&store, &customs)?;
         reconcile_tool_sync_after_path_change(&store, &key);
         Ok(())
+    })
+    .await?
+}
+
+/// Set or clear the prompt-spec template for any agent (built-in or custom).
+/// An empty/None spec clears the override so the global default applies.
+#[tauri::command]
+pub async fn set_tool_prompt_spec(
+    key: String,
+    spec: Option<String>,
+    store: State<'_, Arc<SkillStore>>,
+) -> Result<(), AppError> {
+    let store = store.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        tool_service::set_tool_prompt_spec(&store, key.trim(), spec.as_deref())
     })
     .await?
 }

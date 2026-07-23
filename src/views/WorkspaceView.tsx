@@ -30,6 +30,8 @@ import type { ManagedSkill, ProjectSkill } from "../lib/tauri";
 import { getErrorMessage } from "../lib/error";
 import { getTagActiveColor, getTagColor, UNTAGGED_FILTER } from "../lib/skillTags";
 import { AddSkillsSheet } from "../components/AddSkillsSheet";
+import { SkillTagFilter } from "./extensions/SkillTagFilter";
+import { TagSkillRow } from "./extensions/TagSkillRow";
 import type { WorkspaceConfig } from "./workspaceConfigs";
 
 function compactHomePath(path: string) {
@@ -234,6 +236,11 @@ export function WorkspaceView({ config }: { config: WorkspaceConfig }) {
   const [deleteLocalConfirmSkill, setDeleteLocalConfirmSkill] = useState<ProjectSkill | null>(null);
   const localDetailRequestRef = useRef(0);
 
+  // ── Smart Tag filter state ──
+  const [smartTags, setSmartTags] = useState<api.SmartTag[]>([]);
+  const [smartTagsMap, setSmartTagsMap] = useState<Record<string, string[]>>({});
+  const [selectedSmartTagId, setSelectedSmartTagId] = useState<string | null>(null);
+
   // Cross-category redirect: a deep link like /global-workspace/openclaw should
   // land on /lobster-workspace/openclaw. Compute it before any filtering so a
   // category mismatch doesn't briefly render "agent not found".
@@ -326,6 +333,23 @@ export function WorkspaceView({ config }: { config: WorkspaceConfig }) {
       loadedAgentKeyRef.current = null;
     };
   }, [currentToolKey, loadLocalSkills]);
+
+  // Load smart tags + their skill membership map once on mount.
+  useEffect(() => {
+    void (async () => {
+      try {
+        const [tags, map] = await Promise.all([
+          api.getSmartTagsExt(),
+          api.getSmartTagsMap(),
+        ]);
+        setSmartTags(tags);
+        setSmartTagsMap(map);
+      } catch (e) {
+        // Smart tags are optional; never crash the workspace on load failure.
+        console.warn("Failed to load smart tags", e);
+      }
+    })();
+  }, []);
 
   // Load real on-disk skill counts for every installed agent while the overview
   // is shown (#287). Scoped to the overview (currentToolKey === null); the
@@ -429,6 +453,19 @@ export function WorkspaceView({ config }: { config: WorkspaceConfig }) {
         );
       });
   }, [localSkills, search, tagFilters]);
+
+  // Managed skills belonging to the selected smart tag (null when no tag is
+  // selected, meaning the normal local-skills list is shown).
+  const tagFilteredSkills = useMemo<ManagedSkill[] | null>(() => {
+    if (!selectedSmartTagId) return null;
+    const skillIdsForTag = new Set<string>();
+    for (const [skillId, tagIds] of Object.entries(smartTagsMap)) {
+      if (tagIds.includes(selectedSmartTagId)) skillIdsForTag.add(skillId);
+    }
+    return managedSkills
+      .filter((s) => skillIdsForTag.has(s.id))
+      .sort((a, b) => a.name.localeCompare(b.name));
+  }, [selectedSmartTagId, smartTagsMap, managedSkills]);
 
   const inSyncLocalCount = useMemo(
     () => localSkills.filter((skill) => skill.sync_status === "in_sync").length,
@@ -834,6 +871,19 @@ export function WorkspaceView({ config }: { config: WorkspaceConfig }) {
           </div>
         </div>
 
+        {/* Smart Tag filter (generate prompt + organize agent dir) */}
+        {currentTool && (
+          <SkillTagFilter
+            smartTags={smartTags}
+            smartTagsMap={smartTagsMap}
+            managedSkills={managedSkills}
+            agent={currentTool}
+            onRefresh={handleSheetInstalled}
+            selectedTagId={selectedSmartTagId}
+            onSelectTag={setSelectedSmartTagId}
+          />
+        )}
+
         {allLocalTags.length > 0 && (
           <div className="flex flex-wrap items-center gap-1.5">
             <span className="text-[12px] text-muted">{t("mySkills.tags.filter")}</span>
@@ -912,7 +962,42 @@ export function WorkspaceView({ config }: { config: WorkspaceConfig }) {
         )}
       </div>
 
-      {localSkillsLoading ? (
+      {tagFilteredSkills !== null ? (
+        /* Smart-tag-filtered view: show managed skills for the selected tag. */
+        <div className="pb-8">
+          <div className="mb-3 flex items-center justify-between">
+            <span className="text-[13px] text-muted">
+              {t("promptPreview.tagFilteredSummary", {
+                count: tagFilteredSkills.length,
+              })}
+            </span>
+            <button
+              type="button"
+              onClick={() => setSelectedSmartTagId(null)}
+              className="text-[12px] font-medium text-accent hover:underline"
+            >
+              {t("promptPreview.clearFilter")}
+            </button>
+          </div>
+          {tagFilteredSkills.length === 0 ? (
+            <div className="flex min-h-[200px] items-center justify-center text-[13px] text-muted">
+              {t("promptPreview.noMatchingSkills")}
+            </div>
+          ) : (
+            <div className="flex flex-col gap-1.5">
+              {tagFilteredSkills.map((skill) => (
+                <TagSkillRow
+                  key={skill.id}
+                  skill={skill}
+                  agentKey={currentToolKey ?? ""}
+                  agentDisplayName={currentTool?.display_name ?? currentToolKey ?? ""}
+                  onSynced={handleSheetInstalled}
+                />
+              ))}
+            </div>
+          )}
+        </div>
+      ) : localSkillsLoading ? (
         <div className="flex items-center gap-2 py-4 text-[13px] text-muted">
           <Loader2 className="h-3.5 w-3.5 animate-spin" />
           {t("common.loading")}

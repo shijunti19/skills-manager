@@ -109,6 +109,23 @@ pub struct ScenarioSkillToolToggleRecord {
     pub updated_at: i64,
 }
 
+/// A smart tag: a named, reusable classification group with an optional
+/// prompt that gets appended when generating a combined prompt. `agents`
+/// is a JSON array stored as TEXT — an empty array means the tag is global
+/// (shown on every agent page, which is the seed-data default).
+#[derive(Debug, Clone, Serialize)]
+pub struct SmartTagRecord {
+    pub id: String,
+    pub name: String,
+    /// JSON array of agent keys, e.g. `["cursor","claude_code"]`. `[]` = global.
+    pub agents: String,
+    pub description: Option<String>,
+    pub prompt: Option<String>,
+    pub sort_order: i32,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
 impl SkillStore {
     pub fn new(db_path: &PathBuf) -> Result<Self> {
         let conn = Connection::open(db_path)?;
@@ -438,6 +455,13 @@ impl SkillStore {
 
     pub fn delete_skill(&self, id: &str) -> Result<()> {
         let conn = self.conn.lock().unwrap();
+        // Manually clean smart-tag bindings — some pre-existing relation
+        // tables (from a newer, since-reverted build) lack the ON DELETE
+        // CASCADE clause that this version's fresh schema defines.
+        conn.execute(
+            "DELETE FROM skill_smart_tag_relations WHERE skill_id = ?1",
+            params![id],
+        )?;
         conn.execute("DELETE FROM skills WHERE id = ?1", params![id])?;
         Ok(())
     }
@@ -1307,6 +1331,197 @@ impl SkillStore {
         Ok(affected)
     }
 
+    // ── Smart Tags ──
+
+    pub fn get_all_smart_tags(&self) -> Result<Vec<SmartTagRecord>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, name, agents, description, prompt, sort_order, created_at, updated_at
+             FROM smart_tags ORDER BY sort_order, name",
+        )?;
+        let rows = stmt.query_map([], map_smart_tag_row)?;
+        Ok(rows.filter_map(|r| r.ok()).collect())
+    }
+
+    pub fn get_smart_tag_by_id(&self, id: &str) -> Result<Option<SmartTagRecord>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, name, agents, description, prompt, sort_order, created_at, updated_at
+             FROM smart_tags WHERE id = ?1",
+        )?;
+        let mut rows = stmt.query_map(params![id], map_smart_tag_row)?;
+        Ok(rows.next().and_then(|r| r.ok()))
+    }
+
+    pub fn insert_smart_tag(&self, tag: &SmartTagRecord) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO smart_tags (id, name, agents, description, prompt, sort_order, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![
+                tag.id,
+                tag.name,
+                tag.agents,
+                tag.description,
+                tag.prompt,
+                tag.sort_order,
+                tag.created_at,
+                tag.updated_at,
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Update the mutable fields of a smart tag. `id` is the key.
+    pub fn update_smart_tag(
+        &self,
+        id: &str,
+        name: &str,
+        agents: &str,
+        description: Option<&str>,
+        prompt: Option<&str>,
+    ) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        conn.execute(
+            "UPDATE smart_tags
+             SET name = ?1, agents = ?2, description = ?3, prompt = ?4, updated_at = ?5
+             WHERE id = ?6",
+            params![name, agents, description, prompt, now, id],
+        )?;
+        Ok(())
+    }
+
+    pub fn delete_smart_tag(&self, id: &str) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        // Manually clean bindings first — some pre-existing tables (from a
+        // newer, since-reverted build) lack the ON DELETE CASCADE clause, so
+        // relying on it would leave orphan rows.
+        conn.execute(
+            "DELETE FROM skill_smart_tag_relations WHERE smart_tag_id = ?1",
+            params![id],
+        )?;
+        conn.execute("DELETE FROM smart_tags WHERE id = ?1", params![id])?;
+        Ok(())
+    }
+
+    /// Returns the ids of skills bound to the given smart tag.
+    pub fn get_skill_ids_for_smart_tag(&self, smart_tag_id: &str) -> Result<Vec<String>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT skill_id FROM skill_smart_tag_relations
+             WHERE smart_tag_id = ?1 ORDER BY skill_id",
+        )?;
+        let rows = stmt.query_map(params![smart_tag_id], |row| row.get::<_, String>(0))?;
+        Ok(rows.filter_map(|r| r.ok()).collect())
+    }
+
+    /// Returns the ids of smart tags bound to the given skill.
+    pub fn get_smart_tag_ids_for_skill(&self, skill_id: &str) -> Result<Vec<String>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT smart_tag_id FROM skill_smart_tag_relations
+             WHERE skill_id = ?1 ORDER BY smart_tag_id",
+        )?;
+        let rows = stmt.query_map(params![skill_id], |row| row.get::<_, String>(0))?;
+        Ok(rows.filter_map(|r| r.ok()).collect())
+    }
+
+    /// Replace the set of smart tags bound to a skill (full sync semantics):
+    /// delete all existing bindings for the skill, then insert the new set.
+    pub fn set_smart_tags_for_skill(&self, skill_id: &str, smart_tag_ids: &[String]) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        let tx = conn.unchecked_transaction()?;
+        tx.execute(
+            "DELETE FROM skill_smart_tag_relations WHERE skill_id = ?1",
+            params![skill_id],
+        )?;
+        for tag_id in smart_tag_ids {
+            let trimmed = tag_id.trim();
+            if !trimmed.is_empty() {
+                // `created_at` is supplied for forward-compat with pre-existing
+                // relation tables that declare it NOT NULL (a newer since-reverted
+                // build did so). This version's fresh schema omits the column, and
+                // INSERT-with-extra-column is rejected there, so try both shapes.
+                let res = tx.execute(
+                    "INSERT OR IGNORE INTO skill_smart_tag_relations
+                        (skill_id, smart_tag_id, created_at) VALUES (?1, ?2, ?3)",
+                    params![skill_id, trimmed, now],
+                );
+                if res.is_err() {
+                    tx.execute(
+                        "INSERT OR IGNORE INTO skill_smart_tag_relations
+                            (skill_id, smart_tag_id) VALUES (?1, ?2)",
+                        params![skill_id, trimmed],
+                    )?;
+                }
+            }
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Bind a skill to a single smart tag (idempotent).
+    pub fn bind_smart_tag_to_skill(&self, skill_id: &str, smart_tag_id: &str) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        // See set_smart_tags_for_skill: try the created_at shape first for
+        // forward-compat, fall back to the 2-column shape on this version's
+        // fresh schema.
+        let res = conn.execute(
+            "INSERT OR IGNORE INTO skill_smart_tag_relations
+                (skill_id, smart_tag_id, created_at) VALUES (?1, ?2, ?3)",
+            params![skill_id, smart_tag_id, now],
+        );
+        if res.is_err() {
+            conn.execute(
+                "INSERT OR IGNORE INTO skill_smart_tag_relations
+                    (skill_id, smart_tag_id) VALUES (?1, ?2)",
+                params![skill_id, smart_tag_id],
+            )?;
+        }
+        Ok(())
+    }
+
+    /// Remove a binding between a skill and a smart tag.
+    pub fn unbind_smart_tag_from_skill(&self, skill_id: &str, smart_tag_id: &str) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "DELETE FROM skill_smart_tag_relations
+             WHERE skill_id = ?1 AND smart_tag_id = ?2",
+            params![skill_id, smart_tag_id],
+        )?;
+        Ok(())
+    }
+
+    /// Returns a map: skill_id -> vec of smart_tag_ids. Used to annotate
+    /// every managed skill with its smart-tag membership in one query.
+    pub fn get_smart_tags_map(&self) -> Result<std::collections::HashMap<String, Vec<String>>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT skill_id, smart_tag_id FROM skill_smart_tag_relations",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?;
+        let mut map: std::collections::HashMap<String, Vec<String>> =
+            std::collections::HashMap::new();
+        for row in rows.filter_map(|r| r.ok()) {
+            map.entry(row.0).or_default().push(row.1);
+        }
+        Ok(map)
+    }
+
     // ── Audit log ──
 
     /// Append an audit entry. Best-effort: errors are swallowed so callers
@@ -1528,6 +1743,19 @@ fn map_skill_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SkillRecord> {
         update_status: row.get(16)?,
         last_checked_at: row.get(17)?,
         last_check_error: row.get(18)?,
+    })
+}
+
+fn map_smart_tag_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SmartTagRecord> {
+    Ok(SmartTagRecord {
+        id: row.get(0)?,
+        name: row.get(1)?,
+        agents: row.get(2)?,
+        description: row.get(3)?,
+        prompt: row.get(4)?,
+        sort_order: row.get(5)?,
+        created_at: row.get(6)?,
+        updated_at: row.get(7)?,
     })
 }
 

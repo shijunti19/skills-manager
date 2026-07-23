@@ -47,15 +47,15 @@ fn set_owner_readonly(_path: &Path) {}
 
 /// Encrypt `plaintext` with AES-256-GCM and return an `enc:v1:<hex>` string.
 pub fn encrypt(key: &[u8; 32], plaintext: &str) -> Result<String> {
-    let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(key));
+    let cipher = Aes256Gcm::new(&Key::<Aes256Gcm>::from(*key));
 
     let mut nonce_bytes = [0u8; 12];
     use rand::RngCore;
     rand::thread_rng().fill_bytes(&mut nonce_bytes);
-    let nonce = Nonce::from_slice(&nonce_bytes);
+    let nonce = Nonce::from(nonce_bytes);
 
     let ciphertext = cipher
-        .encrypt(nonce, plaintext.as_bytes())
+        .encrypt(&nonce, plaintext.as_bytes())
         .map_err(|_| anyhow::anyhow!("Encryption failed"))?;
 
     // Store as hex(nonce || ciphertext) so the result is printable ASCII.
@@ -77,11 +77,14 @@ pub fn decrypt(key: &[u8; 32], value: &str) -> Result<String> {
     }
 
     let (nonce_bytes, ciphertext) = combined.split_at(12);
-    let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(key));
-    let nonce = Nonce::from_slice(nonce_bytes);
+    let cipher = Aes256Gcm::new(&Key::<Aes256Gcm>::from(*key));
+    let nonce_arr: [u8; 12] = nonce_bytes
+        .try_into()
+        .map_err(|_| anyhow::anyhow!("Invalid nonce length"))?;
+    let nonce = Nonce::from(nonce_arr);
 
     let plaintext = cipher
-        .decrypt(nonce, ciphertext)
+        .decrypt(&nonce, ciphertext)
         .map_err(|_| anyhow::anyhow!("Decryption failed — key mismatch or data corrupted"))?;
 
     String::from_utf8(plaintext).context("Decrypted bytes are not valid UTF-8")

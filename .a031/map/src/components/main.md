@@ -1,0 +1,82 @@
+---
+type: folder
+node_type: file
+grid_w: 20
+grid_h: 16
+canvas_points: "[[0.5,0,1,0,-1],[0.5,1,1,0,1],[0,0.5,1,-1,0],[1,0.5,1,1,0]]"
+---
+# components
+
+## 父节点
+- [← 返回](@/map/src/main.md)
+
+## 子文件
+- [AddProjectDialog.tsx](${ProjectRoot}/src/components/AddProjectDialog.tsx)
+- [AddSkillsSheet.tsx](${ProjectRoot}/src/components/AddSkillsSheet.tsx)
+- [AgentIcon.tsx](${ProjectRoot}/src/components/AgentIcon.tsx)
+- [AgentToggleSection.tsx](${ProjectRoot}/src/components/AgentToggleSection.tsx)
+- [BatchTagDialog.tsx](${ProjectRoot}/src/components/BatchTagDialog.tsx)
+- [CloseActionDialog.tsx](${ProjectRoot}/src/components/CloseActionDialog.tsx)
+- [CloseActionGuard.tsx](${ProjectRoot}/src/components/CloseActionGuard.tsx)
+- [CommandPalette.tsx](${ProjectRoot}/src/components/CommandPalette.tsx)
+- [ConfirmDialog.tsx](${ProjectRoot}/src/components/ConfirmDialog.tsx)
+- [CreatePresetDialog.tsx](${ProjectRoot}/src/components/CreatePresetDialog.tsx)
+- [DeleteSkillButton.tsx](${ProjectRoot}/src/components/DeleteSkillButton.tsx)
+- [DetailSheet.tsx](${ProjectRoot}/src/components/DetailSheet.tsx)
+- [DocumentDiffViewer.tsx](${ProjectRoot}/src/components/DocumentDiffViewer.tsx)
+- [FirstRunRestoreDialog.tsx](${ProjectRoot}/src/components/FirstRunRestoreDialog.tsx)
+- [GitRecoveryDialog.tsx](${ProjectRoot}/src/components/GitRecoveryDialog.tsx)
+- [GitSetupDialog.tsx](${ProjectRoot}/src/components/GitSetupDialog.tsx)
+- [HelpDialog.tsx](${ProjectRoot}/src/components/HelpDialog.tsx)
+- [InstallToast.tsx](${ProjectRoot}/src/components/InstallToast.tsx)
+- [Layout.tsx](${ProjectRoot}/src/components/Layout.tsx)
+- [MultiSelectToolbar.tsx](${ProjectRoot}/src/components/MultiSelectToolbar.tsx)
+- [PresetBar.tsx](${ProjectRoot}/src/components/PresetBar.tsx)
+- [ProjectAgentDots.tsx](${ProjectRoot}/src/components/ProjectAgentDots.tsx)
+- [RenamePresetDialog.tsx](${ProjectRoot}/src/components/RenamePresetDialog.tsx)
+- [Sidebar.tsx](${ProjectRoot}/src/components/Sidebar.tsx)
+- [SkillDetailPanel.tsx](${ProjectRoot}/src/components/SkillDetailPanel.tsx)
+- [SkillMarkdown.tsx](${ProjectRoot}/src/components/SkillMarkdown.tsx)
+- [SkillPickerRow.tsx](${ProjectRoot}/src/components/SkillPickerRow.tsx)
+- [SkillProjectsSection.tsx](${ProjectRoot}/src/components/SkillProjectsSection.tsx)
+- [SkillSourceDiffViewer.tsx](${ProjectRoot}/src/components/SkillSourceDiffViewer.tsx)
+- [StatusBanner.tsx](${ProjectRoot}/src/components/StatusBanner.tsx)
+- [SyncDots.tsx](${ProjectRoot}/src/components/SyncDots.tsx)
+- [TagRenameDialog.tsx](${ProjectRoot}/src/components/TagRenameDialog.tsx)
+
+## 子文件描述
+- [AddProjectDialog.tsx]
+- [AddSkillsSheet.tsx]
+- [AgentIcon.tsx]
+- [AgentToggleSection.tsx]
+- [BatchTagDialog.tsx]
+- [CloseActionDialog.tsx]
+- [CloseActionGuard.tsx]
+- [CommandPalette.tsx]
+- [ConfirmDialog.tsx]
+- [CreatePresetDialog.tsx]
+- [DeleteSkillButton.tsx]
+- [DetailSheet.tsx]
+- [DocumentDiffViewer.tsx]
+- [FirstRunRestoreDialog.tsx]
+- [GitRecoveryDialog.tsx]
+- [GitSetupDialog.tsx]
+- [HelpDialog.tsx]
+- [InstallToast.tsx]
+- [Layout.tsx]
+- [MultiSelectToolbar.tsx]
+- [PresetBar.tsx]
+- [ProjectAgentDots.tsx]
+- [RenamePresetDialog.tsx]
+- [Sidebar.tsx]
+- [SkillDetailPanel.tsx]
+- [SkillMarkdown.tsx]
+- [SkillPickerRow.tsx]
+- [SkillProjectsSection.tsx]
+- [SkillSourceDiffViewer.tsx]
+- [StatusBanner.tsx]
+- [SyncDots.tsx]
+- [TagRenameDialog.tsx]
+
+## 实际路径
+- X:\xiaolu\ai\plugin\skills-manager/src/components

@@ -27,10 +27,10 @@ tauri-plugin-opener = "2"
 tauri-plugin-clipboard-manager = "2"
 tauri-plugin-updater = "2"
 tauri-plugin-single-instance = "2"
-rusqlite = { version = "0.31", features = ["bundled"] }
+rusqlite = { version = "0.40", features = ["bundled"] }
 uuid = { version = "1", features = ["v4", "v7"] }
 sha2 = "0.10"
-dirs = "5.0"
+dirs = "6"
 walkdir = "2.5"
 fs2 = "0.4"
 unicode-normalization = "0.1"
@@ -40,7 +40,7 @@ anyhow = "1.0"
 chrono = "0.4"
 gethostname = "1"
 serde_yaml = "0.9"
-git2 = { version = "0.19", features = ["vendored-openssl"] }
+git2 = { version = "0.21", features = ["vendored-openssl"] }
 tokio = { version = "1", features = ["full"] }
 regex = "1"
 hex = "0.4"
@@ -48,11 +48,11 @@ urlencoding = "2"
 zip = "2"
 tempfile = "3.26.0"
 semver = "1"
-aes-gcm = "0.10"
-keyring = { version = "3", features = ["apple-native", "windows-native", "sync-secret-service", "crypto-rust", "vendored"] }
+aes-gcm = "0.11"
+keyring = { version = "4", features = ["v1"] }
 rand = "0.8"
 image = { version = "0.25", default-features = false, features = ["png"] }
-notify = "6.1.1"
+notify = "8"
 clap = { version = "4.5", features = ["derive"] }
 
 [target.'cfg(windows)'.dependencies]

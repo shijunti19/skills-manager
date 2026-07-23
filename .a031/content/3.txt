@@ -1,0 +1,326 @@
+标签库建设方案
+核心策略
+标签全部 agents=[]（全局通用，在任意 agent 页面点标签即可筛选技能）
+不改动前端代码（已验证：前端标签筛选不按 agents 字段过滤，空标签正常显示）
+直接用 sqlite3 写数据库 ~/.skills-manager/skills-manager.db（已备份）
+已有 2 个标签（rust代码、整理上下文）保留，补全 prompt 后纳入体系
+12 个标签设计（含中文描述 + 中文提示词 + 绑定技能）
+标签 1：🚀 项目初始化
+描述：新项目/老项目接入 AI 工作流的第一步。建索引、生成项目结构、规则文件、缓存，让后续 AI 操作省 token、可追溯。
+提示词（协调指令）：先用 a031-bootstrap 完整跑通工作流：CodeGraph 建索引 → .a031 目录初始化 → 写全局/局部规则 → 生成项目上下文。再用 bmad-generate-project-context / setup-matt-pocock-skills 落地 AGENTS.md。bmad-document-project 用于整理已有项目让 AI 理解。按"最少 token、最少文件读取"原则执行。
+绑定技能（8个）：a031-bootstrap、bmad-generate-project-context、setup-matt-pocock-skills、bmad-document-project、bmad-customize、write-a-skill、skill-creator、git-guardrails-claude-code
+标签 2：🎯 需求对齐（Grilling）
+描述：动手前先把需求问清楚。AI 反复拷问、压力测试你的想法，防止返工。每次改代码前必用。
+提示词：动手实现前必须先用 grilling 类技能把需求彻底对齐。grill-me / grill-with-docs 针对具体计划深挖；bmad-forge-idea 压力测试想法；ask-matt 路由到合适流程。这是 Matt Pocock 最强的能力，每次改动前必用，防止后期返工。
+绑定技能（9个）：grill-me、grill-with-docs、grilling、batch-grill-me、loop-me、bmad-forge-idea、bmad-party-mode、ask-matt、zoom-out
+标签 3：📋 规划与文档（PRD/Spec）
+描述：把对齐后的需求转成 PRD、产品规格、技术 spec、任务拆分。BMAD 全流程规划 + Matt 的转换工具。
+提示词：grilling 对齐后进入规划。bmad-product-brief/bmad-prd 产出产品需求；to-spec / bmad-spec 转技术规格；to-tickets / bmad-create-epics-and-stories / to-issues 拆成可执行任务；bmad-domain-research / bmad-market-research / bmad-technical-research 做调研支撑。
+绑定技能（14个）：bmad-product-brief、bmad-prd、bmad-create-prd、bmad-edit-prd、bmad-validate-prd、bmad-prfaq、to-prd、to-spec、bmad-spec、to-tickets、bmad-create-epics-and-stories、to-issues、bmad-domain-research、bmad-market-research
+标签 4：🏛️ 架构设计
+描述：系统架构 spine、领域建模、DDD 统一语言、深度模块设计。决定项目骨架的关键技能。
+提示词：规划完成后、动手写代码前用这组搭骨架。bmad-architecture / bmad-create-architect 产架构脊柱；bmad-agent-architect 是架构师 agent；domain-modeling + ubiquitous-language 建领域模型和统一语言；codebase-design / setup-ts-deep-modules 设计深度模块。遵循 force=false 不覆盖原则。
+绑定技能（9个）：bmad-architecture、bmad-create-architecture、bmad-agent-architect、domain-modeling、codebase-design、ubiquitous-language、setup-ts-deep-modules、bmad-technical-research、bmad-sprint-planning
+标签 5：⚙️ Rust 系统开发（已有，补全prompt）
+描述：Rust 后端/系统层开发。包含 bmad agent 编码、快速实现、TDD。
+提示词：Rust 后端用这组。bmad-agent-dev 按 story 严格实现；bmad-quick-dev 做小改动/bugfix；implement 按规格落地；tdd 强制红绿重构。注意 cargo test 验证，跨模块改动确认 API 兼容。
+绑定技能（4个，沿用已有）：bmad-agent-dev、bmad-quick-dev、implement、tdd
+标签 6：🎨 Vue 前端开发
+描述：Vue3 全家桶最佳实践：Composition API、JSX、Pinia、Router、测试、可组合函数。
+提示词：Vue 前端用这组。vue-best-practices 强制 Composition API；按场景用 vue-pinia/vue-router/vue-jsx/vue-options-api 对应最佳实践；create-adaptable-composable 写库级 composable；vue-testing-best-practices + vue-debug-guides 做测试和调试；ui-styling / ui-ux-pro-max / design-an-interface 做界面。
+绑定技能（11个）：vue-best-practices、vue-jsx-best-practices、vue-options-api-best-practices、vue-pinia-best-practices、vue-router-best-practices、vue-testing-best-practices、vue-debug-guides、create-adaptable-composable、ui-styling、ui-ux-pro-max、design-an-interface
+标签 7：🐘 PHP 后端开发
+描述：Laravel 部署、Nightwatch 监控、starter kit 升级、部署到 Laravel Cloud。
+提示词：PHP/Laravel 后端用这组。deploying-laravel-cloud 部署管理；configure-nightwatch 配数据采集；starter-kit-upgrade 选择性升级；obsidian-vault 管理笔记知识库。注意数据库操作用专用 db_mcp。
+绑定技能（4个）：deploying-laravel-cloud、configure-nightwatch、starter-kit-upgrade、obsidian-vault
+标签 8：🧪 测试与 QA
+描述：TDD 红绿重构、E2E 测试生成、交互式 QA、Web 应用测试。
+提示词：质量内建。tdd 强制红→绿→重构循环；bmad-qa-generate-e2e-tests 生成端到端测试；qa 交互式 bug 收集；webapp-testing 测试本地 web 应用；scaffold-exercises 搭练习结构。Rust 用 cargo test，Vue 用 Vitest，PHP 用 PHPUnit。
+绑定技能（6个）：tdd、bmad-qa-generate-e2e-tests、qa、webapp-testing、scaffold-exercises、bmad-check-implementation-readiness
+标签 9：🔍 代码审查与重构
+描述：代码审查、对抗式 review、边界用例、架构改进、重构计划。
+提示词：提交前必跑质量关。code-review / bmad-code-review 审代码；bmad-review-* 三个 reviewer（对抗/边界/验证缺口）并行跑；improve-codebase-architecture 每3-5个任务跑一次防架构腐化；request-refactor-plan 出重构计划。遵循"失败即修复即推进"。
+绑定技能（9个）：code-review、bmad-code-review、bmad-review-adversarial-general、bmad-review-edge-case-hunter、bmad-review-verification-gap、improve-codebase-architecture、request-refactor-plan、resolving-merge-conflicts、bmad-checkpoint-preview
+标签 10：🐛 Bug 诊断
+描述：硬 bug 和性能回归的纪律性诊断循环，定位根因。
+提示词：Bug 用诊断循环而非瞎猜。diagnose / diagnosing-bugs 走 Five Whys + 鱼骨图定位根因；bmad-correct-course 管理执行中的重大变更；migrate-to-shoehorn 处理 TS 类型迁移；bmad-retrospective 复盘。先定位根因再修，禁止盲改。
+绑定技能（5个）：diagnose、diagnosing-bugs、bmad-correct-course、migrate-to-shoehorn、bmad-retrospective
+标签 11：✍️ 写作与内容
+描述：文章编辑、写作工作流（beats/fragments/shape）、品牌、设计系统、PPT 幻灯片、Banner、网页克隆。
+提示词：内容创作用这组。写作三件套 writing-fragments（挖素材）→ writing-beats（搭节奏）→ writing-shape（塑形）；edit-article 改文章；slides 做HTML演示；banner-design 设计横幅；brand / design / design-system 做品牌视觉；clone-website 一键克隆网站；seedance-prompt-en 写多模态AI提示词。
+绑定技能（14个）：edit-article、writing-fragments、writing-beats、writing-shape、slides、banner-design、brand、design、design-system、clone-website、seedance-prompt-en、bmad-editorial-review-prose、bmad-editorial-review-structure、writing-great-skills
+标签 12：🧹 上下文管理（已有，补全prompt）
+描述：整理压缩当前对话，生成交接文档，新开会话省 token。长会话必用。
+提示词：上下文变长时立即用。handoff 把当前对话压缩成交接文档供新会话继续；claude-handoff 转后台 agent；workspace-memory 当静默记忆秘书；caveman 极限压缩通信省75%token；to-questionnaire 把无法回答的决策转问卷。主动建议长会话新开。
+绑定技能（5个）：handoff、claude-handoff、workspace-memory、caveman、to-questionnaire
+辅助/路由类技能分配（避免遗漏）
+技能	归属	说明
+bmad-help	标签2需求对齐	BMAD主路由
+research / bmad-index-docs / bmad-shard-doc	标签3规划	调研检索
+bmad-agent-pm/analyst/ux-designer/tech-writer	标签3规划	BMAD角色agent
+bmad-ux	标签6 Vue	UX规划
+bmad-dev-story / bmad-dev-auto / bmad-create-story	标签5 Rust	BMAD开发流
+bmad-sprint-status / bmad-spec / bmad-validate-prd	标签3规划	
+bmad-quick-dev	标签5 Rust	快速实现
+teach	标签12上下文	教学记忆
+prototype	标签6 Vue	原型
+wizard	标签11写作	向导生成
+find-skills	标签1初始化	技能发现
+wayfinder	标签1初始化	大块工作规划
+accessibility	标签6 Vue	无障碍
+setup-pre-commit	标签1初始化	pre-commit钩子
+handoff/zoom-out 等	已分配	
+最终确保 全部 181 个技能都有归属（含 deprecated-shim/2026-07-5 等无效技能排除）。
+
+执行步骤
+写 SQL 脚本：生成 10 个新标签的 INSERT（agents='[]'，带完整中文 description + prompt）+ 2 个已有标签的 UPDATE（补 prompt）+ 所有技能绑定关系的 INSERT
+执行写入：用 sqlite3 执行该脚本（事务包裹，出错回滚）
+验证：查询确认 12 个标签 + 绑定关系数量正确，每个技能至少归属1个标签
+清理 .agents（按你选择的"清理重建skills-full"）：检查 skills-full 缺失技能，告知你哪些需重新同步（同步操作你自己来）
+验证标准
+smart_tags 表：12 条记录（原2 + 新10），全部 agents='[]'，description 和 prompt 均非空中文
+skill_smart_tag_relations 表：所有有效技能至少1条关系
+在 Skills Manager 点 zcode → 标签筛选区显示全部12个标签 → 点标签筛选出对应技能
+
+
+标签库建设方案
+核心策略
+标签全部 agents=[]（全局通用，在任意 agent 页面点标签即可筛选技能）
+不改动前端代码（已验证：前端标签筛选不按 agents 字段过滤，空标签正常显示）
+直接用 sqlite3 写数据库 ~/.skills-manager/skills-manager.db（已备份）
+已有 2 个标签（rust代码、整理上下文）保留，补全 prompt 后纳入体系
+12 个标签设计（含中文描述 + 中文提示词 + 绑定技能）
+标签 1：🚀 项目初始化
+描述：新项目/老项目接入 AI 工作流的第一步。建索引、生成项目结构、规则文件、缓存，让后续 AI 操作省 token、可追溯。
+提示词（协调指令）：先用 a031-bootstrap 完整跑通工作流：CodeGraph 建索引 → .a031 目录初始化 → 写全局/局部规则 → 生成项目上下文。再用 bmad-generate-project-context / setup-matt-pocock-skills 落地 AGENTS.md。bmad-document-project 用于整理已有项目让 AI 理解。按"最少 token、最少文件读取"原则执行。
+绑定技能（8个）：a031-bootstrap、bmad-generate-project-context、setup-matt-pocock-skills、bmad-document-project、bmad-customize、write-a-skill、skill-creator、git-guardrails-claude-code
+标签 2：🎯 需求对齐（Grilling）
+描述：动手前先把需求问清楚。AI 反复拷问、压力测试你的想法，防止返工。每次改代码前必用。
+提示词：动手实现前必须先用 grilling 类技能把需求彻底对齐。grill-me / grill-with-docs 针对具体计划深挖；bmad-forge-idea 压力测试想法；ask-matt 路由到合适流程。这是 Matt Pocock 最强的能力，每次改动前必用，防止后期返工。
+绑定技能（9个）：grill-me、grill-with-docs、grilling、batch-grill-me、loop-me、bmad-forge-idea、bmad-party-mode、ask-matt、zoom-out
+标签 3：📋 规划与文档（PRD/Spec）
+描述：把对齐后的需求转成 PRD、产品规格、技术 spec、任务拆分。BMAD 全流程规划 + Matt 的转换工具。
+提示词：grilling 对齐后进入规划。bmad-product-brief/bmad-prd 产出产品需求；to-spec / bmad-spec 转技术规格；to-tickets / bmad-create-epics-and-stories / to-issues 拆成可执行任务；bmad-domain-research / bmad-market-research 做调研支撑。
+绑定技能（14个）：bmad-product-brief、bmad-prd、bmad-create-prd、bmad-edit-prd、bmad-validate-prd、bmad-prfaq、to-prd、to-spec、bmad-spec、to-tickets、bmad-create-epics-and-stories、to-issues、bmad-domain-research、bmad-market-research
+标签 4：🏛️ 架构设计
+描述：系统架构 spine、领域建模、DDD 统一语言、深度模块设计。决定项目骨架的关键技能。
+提示词：规划完成后、动手写代码前用这组搭骨架。bmad-architecture / bmad-create-architect 产架构脊柱；bmad-agent-architect 是架构师 agent；domain-modeling + ubiquitous-language 建领域模型和统一语言；codebase-design / setup-ts-deep-modules 设计深度模块。遵循 force=false 不覆盖原则。
+绑定技能（9个）：bmad-architecture、bmad-create-architecture、bmad-agent-architect、domain-modeling、codebase-design、ubiquitous-language、setup-ts-deep-modules、bmad-technical-research、bmad-sprint-planning
+标签 5：⚙️ Rust 系统开发（已有，补全prompt）
+描述：Rust 后端/系统层开发。包含 bmad agent 编码、快速实现、TDD。
+提示词：Rust 后端用这组。bmad-agent-dev 按 story 严格实现；bmad-quick-dev 做小改动/bugfix；implement 按规格落地；tdd 强制红绿重构。注意 cargo test 验证，跨模块改动确认 API 兼容。
+绑定技能（4个，沿用已有）：bmad-agent-dev、bmad-quick-dev、implement、tdd
+标签 6：🎨 Vue 前端开发
+描述：Vue3 全家桶最佳实践：Composition API、JSX、Pinia、Router、测试、可组合函数。
+提示词：Vue 前端用这组。vue-best-practices 强制 Composition API；按场景用 vue-pinia/vue-router/vue-jsx/vue-options-api 对应最佳实践；create-adaptable-composable 写库级 composable；vue-testing-best-practices + vue-debug-guides 做测试和调试；ui-styling / ui-ux-pro-max / design-an-interface 做界面。
+绑定技能（11个）：vue-best-practices、vue-jsx-best-practices、vue-options-api-best-practices、vue-pinia-best-practices、vue-router-best-practices、vue-testing-best-practices、vue-debug-guides、create-adaptable-composable、ui-styling、ui-ux-pro-max、design-an-interface
+标签 7：🐘 PHP 后端开发
+描述：Laravel 部署、Nightwatch 监控、starter kit 升级、部署到 Laravel Cloud。
+提示词：PHP/Laravel 后端用这组。deploying-laravel-cloud 部署管理；configure-nightwatch 配数据采集；starter-kit-upgrade 选择性升级；obsidian-vault 管理笔记知识库。注意数据库操作用专用 db_mcp。
+绑定技能（4个）：deploying-laravel-cloud、configure-nightwatch、starter-kit-upgrade、obsidian-vault
+标签 8：🧪 测试与 QA
+描述：TDD 红绿重构、E2E 测试生成、交互式 QA、Web 应用测试。
+提示词：质量内建。tdd 强制红→绿→重构循环；bmad-qa-generate-e2e-tests 生成端到端测试；qa 交互式 bug 收集；webapp-testing 测试本地 web 应用；scaffold-exercises 搭练习结构。Rust 用 cargo test，Vue 用 Vitest，PHP 用 PHPUnit。
+绑定技能（6个）：tdd、bmad-qa-generate-e2e-tests、qa、webapp-testing、scaffold-exercises、bmad-check-implementation-readiness
+标签 9：🔍 代码审查与重构
+描述：代码审查、对抗式 review、边界用例、架构改进、重构计划。
+提示词：提交前必跑质量关。code-review / bmad-code-review 审代码；bmad-review-* 三个 reviewer（对抗/边界/验证缺口）并行跑；improve-codebase-architecture 每3-5个任务跑一次防架构腐化；request-refactor-plan 出重构计划。遵循"失败即修复即推进"。
+绑定技能（9个）：code-review、bmad-code-review、bmad-review-adversarial-general、bmad-review-edge-case-hunter、bmad-review-verification-gap、improve-codebase-architecture、request-refactor-plan、resolving-merge-conflicts、bmad-checkpoint-preview
+标签 10：🐛 Bug 诊断
+描述：硬 bug 和性能回归的纪律性诊断循环，定位根因。
+提示词：Bug 用诊断循环而非瞎猜。diagnose / diagnosing-bugs 走 Five Whys + 鱼骨图定位根因；bmad-correct-course 管理执行中的重大变更；migrate-to-shoehorn 处理 TS 类型迁移；bmad-retrospective 复盘。先定位根因再修，禁止盲改。
+绑定技能（5个）：diagnose、diagnosing-bugs、bmad-correct-course、migrate-to-shoehorn、bmad-retrospective
+标签 11：✍️ 写作与内容
+描述：文章编辑、写作工作流（beats/fragments/shape）、品牌、设计系统、PPT 幻灯片、Banner、网页克隆。
+提示词：内容创作用这组。写作三件套 writing-fragments（挖素材）→ writing-beats（搭节奏）→ writing-shape（塑形）；edit-article 改文章；slides 做HTML演示；banner-design 设计横幅；brand / design / design-system 做品牌视觉；clone-website 一键克隆网站；seedance-prompt-en 写多模态AI提示词。
+绑定技能（14个）：edit-article、writing-fragments、writing-beats、writing-shape、slides、banner-design、brand、design、design-system、clone-website、seedance-prompt-en、bmad-editorial-review-prose、bmad-editorial-review-structure、writing-great-skills
+标签 12：🧹 上下文管理（已有，补全prompt）
+描述：整理压缩当前对话，生成交接文档，新开会话省 token。长会话必用。
+提示词：上下文变长时立即用。handoff 把当前对话压缩成交接文档供新会话继续；claude-handoff 转后台 agent；workspace-memory 当静默记忆秘书；caveman 极限压缩通信省75%token；to-questionnaire 把无法回答的决策转问卷。主动建议长会话新开。
+绑定技能（5个）：handoff、claude-handoff、workspace-memory、caveman、to-questionnaire
+辅助/路由类技能补充分配（确保全覆盖）
+bmad-help → 标签2需求对齐（BMAD主路由）
+research / bmad-index-docs / bmad-shard-doc → 标签3规划
+bmad-agent-pm/analyst/ux-designer/tech-writer → 标签3规划（角色agent）
+bmad-ux → 标签6 Vue（UX规划）
+bmad-dev-story / bmad-dev-auto / bmad-create-story → 标签5 Rust
+bmad-sprint-status → 标签3规划
+teach → 标签12上下文
+prototype → 标签6 Vue
+wizard → 标签11写作
+find-skills / wayfinder → 标签1初始化
+accessibility → 标签6 Vue
+setup-pre-commit → 标签1初始化
+bmad-product-brief 已在标签3
+最终确保全部有效技能都有归属（排除 deprecated-shim、2026-07-5、to-issues-3/to-prd-3 等空描述变体优先取主版本）。
+
+执行步骤
+生成 SQL 脚本：10 个新标签 INSERT（agents='[]'，完整中文 description+prompt）+ 2 个已有标签 UPDATE（补 prompt，清空 agents）+ 全部技能绑定 INSERT
+执行写入：sqlite3 执行脚本（事务包裹，出错回滚）
+验证：确认 12 标签 + 绑定关系数量、每个有效技能至少1归属
+清理 .agents：告知 skills-full 缺失技能清单（同步你自己来）
+验证标准
+smart_tags 表：12 条，全部 agents='[]'，description/prompt 非空中文
+skill_smart_tag_relations：所有有效技能至少1条
+Skills Manager 点 zcode → 标签筛选显示全部12个标签 → 点标签筛出技能
+
+标签库建设方案（12 个全栈工作流标签）
+核心策略
+标签全部 agents=[]（全局通用，点任意 agent → 显示全部标签 → 点标签筛选技能）
+不改动前端代码（已验证：前端 SkillTagFilter.tsx 标签筛选完全不按 agents 字段过滤，空标签在所有 agent 页面正常显示）
+直接用 sqlite3 写数据库 ~/.skills-manager/skills-manager.db（已备份 .bak）
+已有 2 个标签（rust代码、整理上下文）保留，补全 prompt + 清空 agents 后纳入体系
+12 个标签设计（中文描述 + 中文提示词 + 绑定技能）
+#	标签名	中文描述	绑定技能（按 name，取主版本）
+1	🚀 项目初始化	新项目/老项目接入 AI 工作流的第一步。建索引、生成项目结构、规则文件、缓存，让后续 AI 操作省 token、可追溯	a031-bootstrap, bmad-generate-project-context, setup-matt-pocock-skills, bmad-document-project, bmad-customize, write-a-skill, skill-creator, git-guardrails-claude-code, find-skills, wayfinder, setup-pre-commit
+2	🎯 需求对齐	动手前先把需求问清楚。AI 反复拷问、压力测试想法，防止返工，每次改代码前必用	grill-me, grill-with-docs, grilling, batch-grill-me, loop-me, bmad-forge-idea, bmad-party-mode, ask-matt, zoom-out, bmad-help
+3	📋 规划与文档	把对齐后的需求转成 PRD、产品规格、技术 spec、任务拆分	bmad-product-brief, bmad-prd, bmad-create-prd, bmad-edit-prd, bmad-validate-prd, bmad-prfaq, to-prd, to-spec, bmad-spec, to-tickets, bmad-create-epics-and-stories, to-issues, bmad-domain-research, bmad-market-research, research, bmad-index-docs, bmad-shard-doc, bmad-agent-pm, bmad-agent-analyst, bmad-agent-tech-writer, bmad-agent-ux-designer, bmad-sprint-status, bmad-sprint-planning
+4	🏛️ 架构设计	系统架构 spine、领域建模、DDD 统一语言、深度模块设计	bmad-architecture, bmad-create-architecture, bmad-agent-architect, domain-modeling, codebase-design, ubiquitous-language, setup-ts-deep-modules, bmad-technical-research
+5	⚙️ Rust系统开发（已有）	Rust 后端/系统层开发。bmad agent 编码、快速实现、TDD	bmad-agent-dev, bmad-quick-dev, implement, tdd, bmad-dev-story, bmad-dev-auto, bmad-create-story
+6	🎨 Vue前端开发	Vue3 全家桶最佳实践：Composition API、JSX、Pinia、Router、测试、可组合函数、UI	vue-best-practices, vue-jsx-best-practices, vue-options-api-best-practices, vue-pinia-best-practices, vue-router-best-practices, vue-testing-best-practices, vue-debug-guides, create-adaptable-composable, ui-styling, ui-ux-pro-max, design-an-interface, bmad-ux, prototype, accessibility
+7	🐘 PHP后端开发	Laravel 部署、Nightwatch 监控、starter kit 升级、知识库管理	deploying-laravel-cloud, configure-nightwatch, starter-kit-upgrade, obsidian-vault
+8	🧪 测试与QA	TDD 红绿重构、E2E 测试生成、交互式 QA、Web 应用测试	tdd, bmad-qa-generate-e2e-tests, qa, webapp-testing, scaffold-exercises, bmad-check-implementation-readiness
+9	🔍 代码审查与重构	代码审查、对抗式 review、边界用例、架构改进、重构计划	code-review, bmad-code-review, bmad-review-adversarial-general, bmad-review-edge-case-hunter, bmad-review-verification-gap, improve-codebase-architecture, request-refactor-plan, resolving-merge-conflicts, bmad-checkpoint-preview
+10	🐛 Bug诊断	硬 bug 和性能回归的纪律性诊断循环，定位根因	diagnose, diagnosing-bugs, bmad-correct-course, migrate-to-shoehorn, bmad-retrospective
+11	✍️ 写作与内容	文章编辑、写作工作流、品牌、设计系统、PPT、Banner、网页克隆	edit-article, writing-fragments, writing-beats, writing-shape, slides, banner-design, brand, design, design-system, clone-website, seedance-prompt-en, bmad-editorial-review-prose, bmad-editorial-review-structure, writing-great-skills, wizard
+12	🧹 上下文管理（已有）	整理压缩当前对话，生成交接文档，新开会话省 token	handoff, claude-handoff, workspace-memory, caveman, to-questionnaire, teach
+每个标签都配有完整的中文"提示词"（协调指令），告诉 AI 这组技能如何配合使用（如标签1写明 a031-bootstrap 工作流顺序）。提示词会拼到所有技能 SKILL.md 之后作为 "Additional Instructions"。
+
+执行步骤
+生成 SQL 脚本：写到临时 .sql 文件
+10 个新标签 INSERT（agents='[]'，完整中文 description+prompt）
+2 个已有标签 UPDATE（补全中文 prompt，清空 agents='[]'）
+全部技能→标签绑定 INSERT（skill_id 通过 name 精确匹配取主版本）
+执行写入：sqlite3 db ".read script.sql"（事务包裹，出错回滚）
+验证：
+smart_tags 表 12 条，全部 agents='[]'，description/prompt 非空中文
+skill_smart_tag_relations 表每个有效技能至少1归属
+输出标签→技能数统计表
+清理 .agents（你选的"清理重建skills-full"）：检查 skills-full 缺失技能，告知清单（同步你自己来）
+验证标准
+smart_tags 表：12 条，全部 agents='[]'，description/prompt 非空中文
+skill_smart_tag_relations：所有有效技能至少1条
+Skills Manager 点 zcode → 标签筛选区显示全部12个标签 → 点标签筛出对应技能
+不在范围内
+不改前端/Rust 代码（验证无需改动）
+不执行技能同步（.zcode/skills 安装你自己来）
+清理 .agents/.skill-lock.json 只做诊断报告，不删文件
+
+实施计划：自定义 Agent 提示词规范 + 生成提示词弹窗重构
+需求拆解
+后端：给自定义 Agent（CustomToolDef）新增"技能提示词规范"字段（skills_prompt_spec）
+设置页：新增 Agent 表单 + 已有卡片，都能编辑这个字段
+生成提示词重构：点"生成"弹出多行可滚动文本框 modal，按规范格式拼装；用户可编辑任务输入框，本地缓存
+重新生成：清空全部重新拼装
+第一部分：后端新增字段（4 个文件）
+1. src-tauri/src/core/tool_adapters.rs:51-59 — CustomToolDef 加字段
+
+rust
+pub struct CustomToolDef {
+    pub key: String,
+    pub display_name: String,
+    pub skills_dir: String,
+    #[serde(default)] pub project_relative_skills_dir: Option<String>,
+    #[serde(default)] pub category: ToolCategory,
+    #[serde(default)] pub skills_prompt_spec: Option<String>,  // 新增
+}
+同时给 ToolAdapter（内置 agent，tool_adapters.rs:17-47）也加同名字段 #[serde(default)] skills_prompt_spec: Option<String>，让内置 agent 也支持（默认 None）。
+
+2. src-tauri/src/core/tool_service.rs:11-22 — ToolInfo 加字段
+
+rust
+pub struct ToolInfo {
+    ...
+    #[serde(default)] pub skills_prompt_spec: Option<String>,  // 新增
+}
+在 list_tool_info（215-253）映射时从 adapter 读出填入。
+
+3. src-tauri/src/commands/tools.rs
+ToolInfoDto（22-34）加 #[serde(default)] pub skills_prompt_spec: Option<String>
+get_tool_status（70-83）映射补一行
+add_custom_tool（311-353）签名加参数 skills_prompt_spec: Option<String>，构造 CustomToolDef 时填入
+新增命令 set_custom_tool_prompt_spec(key, spec)：仿 set_custom_tool_project_path（241-286）模式，改 CustomToolDef 后 set_custom_tools 持久化
+在 lib.rs invoke_handler 注册新命令
+第二部分：前端类型 + API（2 个文件）
+4. src/lib/tauri.ts
+ToolInfo（7-18）加 skills_prompt_spec: string | null
+addCustomTool（219-230）参数加 skillsPromptSpec?: string | null
+新增 setCustomToolPromptSpec(key, spec) => invoke("set_custom_tool_prompt_spec", ...)，仿 setCustomToolProjectPath（207-214）
+5. src/views/Settings.tsx（设置页）
+新增 state customPromptSpec（仿 customProjectPath:211）
+新增表单（1121-1184 区块）加一个 Textarea 输入框（参考 TagPanel.tsx:456 的 app-input 写法），label "技能提示词规范"，placeholder 说明：[$a031-bootstrap](技能路径) ... 定义技能在生成的提示词里的引用规范
+handleAddCustomAgent（297-317）传新参数给 api.addCustomTool，末尾清空 state
+已有卡片（renderAgentCard 814-1059，项目路径编辑区 990-1056 附近）仿照加内联编辑 UI：铅笔图标 + Textarea，保存调 api.setCustomToolPromptSpec
+i18n：zh.json/en.json/zh-TW.json 的 settings 节点加 3 个 key（label/placeholder/desc）
+第三部分：生成提示词弹窗重构（核心）
+6. 新建 src/components/PromptPreviewDialog.tsx
+参考 HelpDialog.tsx 的居中可滚动结构：
+
+
+text
+┌─────────────────────────────────────┐
+│ 生成提示词            [复制] [关闭]  │
+├─────────────────────────────────────┤
+│ ┌─────────────────────────────────┐ │
+│ │ {标签描述}                      │ │ ← 只读展示区
+│ │ [技能1](C:\...\SKILL.md)        │ │   max-h-[50vh]
+│ │ [技能2](C:\...\SKILL.md)        │ │   overflow-y-auto
+│ │ ...                             │ │   white-space: pre-wrap
+│ │ {标签提示词}                    │ │
+│ │                                 │ │
+│ │ ─── 你的任务（可编辑）──────   │ │
+│ │ ┌─────────────────────────────┐ │ │ ← 用户输入框
+│ │ │ 在这里写下你要做的事...     │ │ │   textarea
+│ │ └─────────────────────────────┘ │ │   onChange → localStorage
+│ └─────────────────────────────────┘ │
+│            [重新生成] [复制全部]     │
+└─────────────────────────────────────┘
+Props: open, onClose, generatedText, selectedTags, managedSkills, agentTool
+内部展示区用 <pre className="whitespace-pre-wrap"> 渲染生成的 markdown 链接文本
+用户任务输入框 <textarea>，onChange 写 localStorage（key: skills-manager:taskDraft，try/catch）
+"重新生成"按钮：清空全部（generatedText + taskDraft），重新拼装
+7. 重构 src/views/extensions/SkillTagFilter.tsx
+handleGeneratePrompt（66-138）重写：
+不再直接 clipboard + toast
+改为按规范格式拼装：
+
+text
+{标签1描述}\n{标签2描述}\n
+[技能名1](技能central_path\SKILL.md)
+[技能名2](...)
+...
+{标签1提示词}\n{标签2提示词}
+─── 你的任务 ───
+{用户任务输入框}
+路径用技能的 central_path + \SKILL.md（Windows 反斜杠），格式 [$技能名](file:///路径) 或 [技能名](路径)
+set state 打开 PromptPreviewDialog
+新增 state：promptDialogOpen, generatedPrompt
+移除 copiedPrompt 的 clipboard 直写逻辑，改为"复制全部"放到 modal 里
+在 return 末尾（245行 前）渲染 <PromptPreviewDialog>
+8. i18n 三份文件 skillTagFilter 节点新增 key
+promptTitle / taskPlaceholder / regenerate / copyAll 等
+第四部分：数据流与本地缓存
+本地缓存策略（localStorage，遵循 skills-manager: 前缀）
+缓存 key：skills-manager:taskDraft（存用户任务文字）
+读取：PromptPreviewDialog 初始化时惰性读取（try/catch）
+写入：textarea onChange 时写入
+清除：点"重新生成"清空 localStorage 该 key + state
+生成提示词规范字段使用
+生成时如果 agent 有 skills_prompt_spec 字段，把它作为头部说明加进去（可选增强）
+默认 agent 无此字段时用默认规范
+实施顺序
+后端：CustomToolDef/ToolInfo/ToolInfoDto 加字段 + 新增 set_custom_tool_prompt_spec 命令（4文件）
+前端类型/API：tauri.ts 加类型和函数
+新建 PromptPreviewDialog 组件
+重构 SkillTagFilter 的 handleGeneratePrompt
+Settings.tsx 表单 + 卡片编辑 UI
+i18n 三份文件补 key
+编译验证：cargo build + pnpm build
+验证标准
+设置页新增 Agent 时能填"技能提示词规范"，zcode 卡片能编辑此字段
+全局工作区点 zcode → 选标签 → 点"生成" → 弹出多行可滚动 modal
+modal 内容按规范格式：标签描述 + 
+技能名
+ 列表 + 标签提示词 + 用户任务输入框
+用户输入的任务文字本地缓存，下次打开恢复
+点"重新生成"清空全部重新拼装

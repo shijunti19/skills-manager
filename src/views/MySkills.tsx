@@ -4,7 +4,7 @@ import {
   LayoutGrid,
   List,
   CheckCircle2,
-  Github,
+  GitFork as Github,
   HardDrive,
   Globe,
   Layers,

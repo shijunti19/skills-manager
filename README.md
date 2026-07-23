@@ -9,6 +9,18 @@
 </p>
 
 <p align="center">
+  <a href="https://bbs.dguagua.com/topic/Cjkh4b5U5yk">
+    <img src="https://img.shields.io/badge/%F0%9F%94%A5%20%E6%A0%87%E7%AD%BE%E5%8C%96%E7%AE%A1%E7%90%86%20Skills-%E4%B8%80%E4%B8%AA%E5%AF%B9%E8%AF%9D%E7%9C%81%E4%B8%8A%E7%99%BE%E4%B8%87%20Token-red?style=for-the-badge" alt="标签化管理 Skills，省下上百万 Token" />
+  </a>
+</p>
+
+> ### 🔥🔥🔥 标签化管理 Skills，一个对话直接省下**上百万 Token**！
+>
+> 别再让一堆用不上的技能白白吃掉你的上下文窗口。用标签把 Skills 分门别类、按需加载，**同一个对话轻松节省上百万 Token**，速度更快、成本更低、效果更稳。
+>
+> 👉 **不看会后悔** —— 完整原理与实测对比戳这里：[https://bbs.dguagua.com/topic/Cjkh4b5U5yk](https://bbs.dguagua.com/topic/Cjkh4b5U5yk) 👈
+
+<p align="center">
   🎬 <a href="https://www.youtube.com/watch?v=wfbCrfNASVU">Video intro (YouTube)</a>
   &nbsp;·&nbsp;
   <a href="https://www.bilibili.com/video/BV1845F6REUu/">视频介绍 (Bilibili)</a>

@@ -292,6 +292,91 @@ pub async fn set_skill_tool_toggle(
     result
 }
 
+/// Result of organizing an agent's skills directory.
+#[derive(Debug, Serialize)]
+pub struct OrganizeResultDto {
+    pub kept: usize,
+    pub removed: usize,
+}
+
+/// Organize an agent's skills directory so it contains exactly the given
+/// `keep_skill_ids`: remove synced skills that aren't in the keep set, and
+/// sync any missing ones. Honors the global `sync_mode` (symlink or copy).
+///
+/// This is the "organize agent folder" primitive behind the tag-filter
+/// "sync all" button — it makes the agent's folder mirror a tag's skill set,
+/// so only the needed skills load into the agent's context (saving tokens).
+#[tauri::command]
+pub async fn organize_agent_skills(
+    app: AppHandle,
+    agent_key: String,
+    keep_skill_ids: Vec<String>,
+    store: State<'_, Arc<SkillStore>>,
+) -> Result<OrganizeResultDto, AppError> {
+    let store = store.inner().clone();
+    let result = tauri::async_runtime::spawn_blocking(move || -> Result<OrganizeResultDto, AppError> {
+        // Resolve the adapter (must be installed + enabled).
+        let adapter = tool_adapters::find_adapter_with_store(&store, &agent_key)
+            .ok_or_else(|| AppError::not_found(format!("Unknown tool: {}", agent_key)))?;
+        if !adapter.is_installed() {
+            return Err(AppError::not_found(format!(
+                "{} is not installed",
+                adapter.display_name
+            )));
+        }
+        if tool_service::get_disabled_tools(&store).contains(&agent_key) {
+            return Err(AppError::invalid_input(format!(
+                "{} is disabled",
+                adapter.display_name
+            )));
+        }
+
+        let keep_set: std::collections::HashSet<&str> =
+            keep_skill_ids.iter().map(String::as_str).collect();
+
+        // Phase 1: remove synced skills for this agent that aren't in the keep set.
+        let mut removed = 0usize;
+        let existing_targets: Vec<(String, String)> = store
+            .get_all_targets()
+            .map_err(AppError::db)?
+            .into_iter()
+            .filter(|t| t.tool == agent_key)
+            .map(|t| (t.skill_id, t.target_path))
+            .collect();
+        for (skill_id, target_path) in &existing_targets {
+            if !keep_set.contains(skill_id.as_str()) {
+                // Best-effort file removal; always clean the DB record.
+                let _ = sync_engine::remove_target(&PathBuf::from(target_path));
+                store.delete_target(skill_id, &agent_key).map_err(AppError::db)?;
+                removed += 1;
+            }
+        }
+
+        // Phase 2: sync any keep-set skills that aren't yet present.
+        let existing_ids: std::collections::HashSet<String> =
+            existing_targets.iter().map(|(id, _)| id.clone()).collect();
+        let mut kept = existing_targets.len() - removed;
+        for skill_id in &keep_skill_ids {
+            if !existing_ids.contains(skill_id) {
+                // sync_single_skill_to_tool writes the file + DB record,
+                // honoring sync_mode and the Windows symlink->junction->copy fallback.
+                match scenario_service::sync_single_skill_to_tool(&store, skill_id, &agent_key) {
+                    Ok(()) => kept += 1,
+                    Err(e) => {
+                        // A single failing skill shouldn't abort the whole organize.
+                        log::warn!("organize: failed to sync {skill_id} to {agent_key}: {e}");
+                    }
+                }
+            }
+        }
+
+        Ok(OrganizeResultDto { kept, removed })
+    })
+    .await?;
+    schedule_tray_refresh(&app);
+    result
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

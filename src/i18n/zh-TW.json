@@ -971,5 +971,37 @@
         "diverged": "衝突"
       }
     }
+  },
+  "promptPreview": {
+    "title": "生成提示詞",
+    "subtitle": "把這段提示詞發給 AI，它會呼叫對應的技能",
+    "generatedLabel": "提示詞內容",
+    "taskLabel": "你的任務（可選）",
+    "taskPlaceholder": "在這裡寫下你要做的事，會拼接到提示詞末尾…",
+    "cacheHint": "任務文字已本地快取",
+    "regenerate": "重新生成",
+    "copyAll": "複製全部",
+    "copied": "已複製",
+    "copyFailed": "複製失敗",
+    "generate": "生成",
+    "selectTagFirst": "請先選擇標籤",
+    "noMatchingSkills": "該標籤下沒有技能",
+    "synced": "已同步",
+    "notInstalled": "未安裝",
+    "sync": "同步",
+    "syncToAgent": "同步到 {{agent}}",
+    "syncAllToAgent": "同步全部到 {{agent}}",
+    "syncedToast": "已同步到 {{agent}}",
+    "syncAllDone": "已整理 {{agent}}：保留 {{kept}} 個，移除 {{removed}} 個",
+    "syncAllFailed": "同步失敗",
+    "clearFilter": "顯示全部",
+    "tagFilteredSummary": "{{count}} 個技能",
+    "filterByTag": "標籤篩選",
+    "selectTagHint": "選擇標籤篩選技能",
+    "matchedSkills": "{{count}} 個匹配技能",
+    "promptSpecTitle": "技能提示詞規範",
+    "promptSpecPlaceholder": "[]((path))  —  定義技能在提示詞中的引用格式，用 {{name}} 和 {{path}} 占位",
+    "promptSpecDesc": "控制生成提示詞裡技能的引用格式。留空用預設 [](path)。",
+    "promptSpecSaved": "提示詞規範已儲存"
   }
 }

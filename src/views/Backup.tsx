@@ -6,7 +6,7 @@ import {
   Cloud,
   Copy,
   ExternalLink,
-  Github,
+  GitFork as Github,
   History,
   Loader2,
   Pencil,

@@ -15,6 +15,8 @@ export interface ToolInfo {
   project_relative_skills_dir: string | null;
   has_project_path_override: boolean;
   category: ToolCategory;
+  /** Prompt template (`{{name}}`/`{{path}}`). null = use global default. */
+  skills_prompt_spec: string | null;
 }
 
 export interface ManagedSkill {
@@ -221,16 +223,22 @@ export const addCustomTool = (
   displayName: string,
   skillsDir: string,
   projectRelativeSkillsDir?: string,
+  skillsPromptSpec?: string,
 ) =>
   invoke<void>("add_custom_tool", {
     key,
     displayName,
     skillsDir,
     projectRelativeSkillsDir: projectRelativeSkillsDir ?? null,
+    skillsPromptSpec: skillsPromptSpec ?? null,
   });
 
 export const removeCustomTool = (key: string) =>
   invoke<void>("remove_custom_tool", { key });
+
+/** Set or clear the prompt-spec template for an agent (built-in or custom). */
+export const setToolPromptSpec = (key: string, spec: string | null) =>
+  invoke<void>("set_tool_prompt_spec", { key, spec });
 
 // ── Skills ──
 
@@ -791,3 +799,65 @@ export const updateGlobalLocalSkillFromCenter = (agent: string, skillRelativePat
 
 export const deleteGlobalLocalSkill = (agent: string, skillRelativePath: string) =>
   invoke<void>("delete_global_local_skill", { agent, skillRelativePath });
+
+// ── Smart Tags (multi-tag classification with per-tag prompt) ──
+
+export interface SmartTag {
+  id: string;
+  name: string;
+  /** Agent keys this tag applies to. Empty array = global (every agent). */
+  agents: string[];
+  description: string | null;
+  prompt: string | null;
+  sort_order: number;
+  created_at: number;
+  updated_at: number;
+}
+
+export interface SmartTagInput {
+  name: string;
+  agents?: string[];
+  description?: string | null;
+  prompt?: string | null;
+}
+
+export const getSmartTagsExt = () => invoke<SmartTag[]>("get_smart_tags_ext");
+
+/** skill_id -> smart_tag_id[] map, for resolving tag membership in bulk. */
+export const getSmartTagsMap = () =>
+  invoke<Record<string, string[]>>("get_smart_tags_map");
+
+export const createSmartTagExt = (input: SmartTagInput) =>
+  invoke<SmartTag>("create_smart_tag_ext", { input });
+
+export const updateSmartTagExt = (id: string, input: SmartTagInput) =>
+  invoke<SmartTag>("update_smart_tag_ext", { id, input });
+
+export const deleteSmartTagExt = (id: string) =>
+  invoke<void>("delete_smart_tag_ext", { id });
+
+export const getSmartTagIdsForSkill = (skillId: string) =>
+  invoke<string[]>("get_smart_tag_ids_for_skill", { skillId });
+
+export const bindSmartTagsToSkill = (skillId: string, smartTagIds: string[]) =>
+  invoke<void>("bind_smart_tags_to_skill", { skillId, smartTagIds });
+
+export const unbindSmartTagsFromSkill = (skillId: string) =>
+  invoke<void>("unbind_smart_tags_from_skill", { skillId });
+
+// ── Agent skill organize (sync a tag's skills to an agent dir) ──
+
+export interface OrganizeResult {
+  /** Skills kept in (already synced + newly synced). */
+  kept: number;
+  /** Skills removed (were synced but not in the keep set). */
+  removed: number;
+}
+
+/**
+ * Organize an agent's skills directory to contain exactly the given skill ids:
+ * remove synced skills not in `keepSkillIds`, sync any missing ones. Honors
+ * the global sync_mode (symlink or copy).
+ */
+export const organizeAgentSkills = (agentKey: string, keepSkillIds: string[]) =>
+  invoke<OrganizeResult>("organize_agent_skills", { agentKey, keepSkillIds });

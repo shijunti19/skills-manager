@@ -8,7 +8,7 @@ import {
   Unlink,
   Copy,
   Settings2,
-  Github,
+  GitFork as Github,
   Loader2,
   ExternalLink,
   Sun,
@@ -204,11 +204,14 @@ export function Settings() {
   // Project path editing (custom agents only)
   const [editingProjectPathKey, setEditingProjectPathKey] = useState<string | null>(null);
   const [editingProjectPathValue, setEditingProjectPathValue] = useState("");
+  const [editingPromptSpecKey, setEditingPromptSpecKey] = useState<string | null>(null);
+  const [editingPromptSpecValue, setEditingPromptSpecValue] = useState("");
   // Custom agent dialog
   const [showAddCustom, setShowAddCustom] = useState(false);
   const [customName, setCustomName] = useState("");
   const [customPath, setCustomPath] = useState("");
   const [customProjectPath, setCustomProjectPath] = useState("");
+  const [customPromptSpec, setCustomPromptSpec] = useState("");
   const [addingCustom, setAddingCustom] = useState(false);
   const [showMoreAgents, setShowMoreAgents] = useState(false);
 
@@ -245,6 +248,24 @@ export function Settings() {
       await refreshTools();
       toast.success(t("settings.pathSaved"));
       setEditingProjectPathKey(null);
+    } catch (e) {
+      toast.error(String(e));
+    }
+  };
+
+  const startEditPromptSpec = useCallback((key: string, currentSpec: string | null) => {
+    setEditingPromptSpecKey(key);
+    setEditingPromptSpecValue(currentSpec ?? "");
+  }, []);
+
+  const handleSavePromptSpec = async () => {
+    if (!editingPromptSpecKey) return;
+    const trimmed = editingPromptSpecValue.trim();
+    try {
+      await api.setToolPromptSpec(editingPromptSpecKey, trimmed || null);
+      await refreshTools();
+      toast.success(t("promptPreview.promptSpecSaved"));
+      setEditingPromptSpecKey(null);
     } catch (e) {
       toast.error(String(e));
     }
@@ -302,13 +323,20 @@ export function Settings() {
     const trimKey = generateCustomAgentKey(trimName);
     setAddingCustom(true);
     try {
-      await api.addCustomTool(trimKey, trimName, trimPath, trimProjectPath || undefined);
+      await api.addCustomTool(
+        trimKey,
+        trimName,
+        trimPath,
+        trimProjectPath || undefined,
+        customPromptSpec.trim() || undefined,
+      );
       await refreshTools();
       toast.success(t("settings.customAgentAdded"));
       setShowAddCustom(false);
       setCustomName("");
       setCustomPath("");
       setCustomProjectPath("");
+      setCustomPromptSpec("");
     } catch (e) {
       toast.error(String(e));
     } finally {
@@ -1054,6 +1082,57 @@ export function Settings() {
               )}
             </div>
           ))}
+
+        {/* Skill prompt spec — controls how skills are referenced in generated prompts */}
+        {agent.installed &&
+          (editingPromptSpecKey === agent.key ? (
+            <div className="flex items-start gap-1">
+              <textarea
+                value={editingPromptSpecValue}
+                onChange={(e) => setEditingPromptSpecValue(e.target.value)}
+                placeholder={t("promptPreview.promptSpecPlaceholder")}
+                rows={2}
+                autoFocus
+                className="min-w-0 flex-1 rounded border border-border-subtle bg-background px-1.5 py-1 text-[12px] font-mono text-secondary outline-none focus:border-accent"
+                onKeyDown={(e) => {
+                  if (e.key === "Escape") setEditingPromptSpecKey(null);
+                }}
+              />
+              <button
+                onClick={handleSavePromptSpec}
+                className="mt-0.5 shrink-0 p-1 text-emerald-500 hover:text-emerald-400 outline-none"
+              >
+                <Check className="h-3 w-3" />
+              </button>
+              <button
+                onClick={() => setEditingPromptSpecKey(null)}
+                className="mt-0.5 shrink-0 p-1 text-muted hover:text-secondary outline-none"
+              >
+                <X className="h-3 w-3" />
+              </button>
+            </div>
+          ) : (
+            <div className="flex items-center gap-1">
+              <p
+                className="min-w-0 flex-1 truncate text-[12px] font-mono leading-tight text-muted"
+                title={agent.skills_prompt_spec ?? t("promptPreview.promptSpecDesc")}
+              >
+                {agent.skills_prompt_spec
+                  ? t("promptPreview.promptSpecTitle") + ": " + agent.skills_prompt_spec
+                  : t("promptPreview.promptSpecDesc")}
+              </p>
+              <button
+                type="button"
+                onClick={() =>
+                  startEditPromptSpec(agent.key, agent.skills_prompt_spec)
+                }
+                className="shrink-0 p-0.5 text-muted hover:text-accent outline-none opacity-0 transition-opacity group-hover:opacity-100"
+                title={t("promptPreview.promptSpecTitle")}
+              >
+                <Pencil className="h-3 w-3" />
+              </button>
+            </div>
+          ))}
       </div>
     </div>
   );
@@ -1168,6 +1247,21 @@ export function Settings() {
                 />
                 <p className="mt-1 text-[12px] text-muted">
                   {t("settings.projectSkillsPathDesc")}
+                </p>
+              </div>
+              <div>
+                <label className="text-[12px] text-muted mb-1 block">
+                  {t("promptPreview.promptSpecTitle")}
+                </label>
+                <textarea
+                  value={customPromptSpec}
+                  onChange={(e) => setCustomPromptSpec(e.target.value)}
+                  placeholder={t("promptPreview.promptSpecPlaceholder")}
+                  rows={2}
+                  className="w-full rounded-md border border-border-subtle bg-surface px-3 py-2 font-mono text-[12px] text-primary placeholder:text-faint focus:border-accent focus:outline-none focus:ring-1 focus:ring-accent"
+                />
+                <p className="mt-1 text-[12px] text-muted">
+                  {t("promptPreview.promptSpecDesc")}
                 </p>
               </div>
               <div className="flex justify-end">
