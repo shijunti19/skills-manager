@@ -74,11 +74,12 @@ function ensureChangelogEntry(changelog, nextVersion, { zh = false } = {}) {
     return changelog;
   }
 
-  const sections = zh
-    ? ['### 发布概览', '- ', '', '### 用户可见更新', '- ', '', '### 开发者与治理更新', '- ']
-    : ['### Release Overview', '- ', '', '### User-facing', '- ', '', '### Developer & Governance', '- '];
-
-  const entry = [heading, '', ...sections, ''].join('\n');
+  // No empty placeholder sections: prepare-release only bumps the version
+  // number, the actual change notes are added manually before the build runs.
+  // Empty sections used to make Extract changelog step in release.yml fail on
+  // every runner (no bullet under any `### ` heading, awk output was empty
+  // and the subsequent `>> $GITHUB_OUTPUT` step lost the multi-line body).
+  const entry = [heading, ''].join('\n');
 
   const firstReleaseHeading = changelog.search(/^## \[/m);
   if (firstReleaseHeading === -1) {
