@@ -89,9 +89,15 @@ jobs:
         id: changelog
         shell: bash
         run: |
+          set +e  # never let a missing CHANGELOG entry abort the whole build
           VERSION=$(node -p "require('./package.json').version")
+          echo "DEBUG: VERSION=$VERSION"
+          echo "DEBUG: changelog section present in CHANGELOG.md? $(grep -c "^\#\# \[${VERSION}\]" CHANGELOG.md || true)"
+          echo "DEBUG: changelog section present in CHANGELOG-zh.md? $(grep -c "^\#\# \[${VERSION}\]" CHANGELOG-zh.md || true)"
           BODY_EN=$(sed -n "/^## \[${VERSION}\]/,/^## \[/{ /^## \[${VERSION}\]/d; /^## \[/d; p; }" CHANGELOG.md | awk -f scripts/strip-empty-sections.awk)
           BODY_ZH=$(sed -n "/^## \[${VERSION}\]/,/^## \[/{ /^## \[${VERSION}\]/d; /^## \[/d; p; }" CHANGELOG-zh.md | awk -f scripts/strip-empty-sections.awk)
+          echo "DEBUG: BODY_EN_LEN=${#BODY_EN}"
+          echo "DEBUG: BODY_ZH_LEN=${#BODY_ZH}"
           # Release date: prefer the date on the CHANGELOG heading; fall back to today.
           RELEASE_DATE=$(grep -m1 "^## \[${VERSION}\] - " CHANGELOG.md | sed -E "s/^## \[${VERSION}\] - ([0-9-]+).*/\1/")
           if [ -z "$RELEASE_DATE" ]; then RELEASE_DATE=$(date -u +%Y-%m-%d); fi
@@ -144,6 +150,7 @@ jobs:
             echo "Full changelog files: [English](https://github.com/${{ github.repository }}/blob/main/CHANGELOG.md) | [中文](https://github.com/${{ github.repository }}/blob/main/CHANGELOG-zh.md)"
             echo "EOF"
           } >> "$GITHUB_OUTPUT"
+          echo "DEBUG: body written to GITHUB_OUTPUT"
 
       - name: Build with Tauri
         uses: tauri-apps/tauri-action@84b9d35b5fc46c1e45415bdb6144030364f7ebc5 # v0

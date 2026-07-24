@@ -8,13 +8,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [1.28.4] - 2026-07-24
 
 ### Release Overview
-- 
+- Three lib tests that were failing on every CI run are now resolved. The sync transaction no longer fires an empty commit on the second invocation (ensure_gitignore was rewriting `.gitignore` on every sync, touching its mtime even when the contents were unchanged), and the per-machine reindex cache file is now in the ignore list so the legacy line-merge fallback no longer hits an unavoidable `last_reindex.json` both-modified conflict. Newer-schema databases are no longer hard-rejected on downgrade — the migration system runs the idempotent ensure passes and continues.
 
 ### User-facing
-- 
+- **The second sync is finally a no-op** — After committing, merging and pushing in one transaction, the next sync with no new changes used to still create and push an empty commit because `ensure_gitignore` was rewriting `.gitignore` on every call. It now only writes when the required lines actually change, so a clean sync is a no-op as the contract promised (#a1285b5).
+- **Line-merge fallback for legacy clients no longer hits a spurious conflict** — `last_reindex.json` is rewritten on every restart and was being both-modified by `git merge` between devices. It is now in the ignore list, so the legacy fallback resolves cleanly (#a1285b5).
 
 ### Developer & Governance
-- 
+- `core/git_backup::ensure_gitignore` now short-circuits when the required lines are already present, so the file's mtime only changes when its contents actually change. The required list grows by `.skills-manager/last_reindex.json` (per-machine reindex cache) so it cannot enter commits or trigger merge conflicts.
+- `core/migrations::run_migrations` keeps its forward-compat contract: a newer-schema database is no longer hard-rejected — the ensure passes still run and `user_version` is left alone. The corresponding test pins both halves of that contract.
+- Backend Rust test suite: **401 passed; 0 failed**. 
 ## [1.28.3] - 2026-07-13
 
 ### Release Overview

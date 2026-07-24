@@ -5,6 +5,20 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [1.28.4] - 2026-07-24
+
+### 发布概览
+- 修复此前每次 CI 都失败的 3 个 lib 测试：sync 事务的"第二次调用是空操作"承诺现在终于成立（`ensure_gitignore` 之前每次都会无条件重写 `.gitignore`，导致即使内容不变也会触发空 commit 并 push）；每台机器的 reindex 缓存文件现在被加入 ignore 列表，旧客户端的 line-merge fallback 不再因此触发不可避免的 `last_reindex.json` 双端冲突。数据库版本号比当前代码版本更新的情况不再被硬性拒绝——迁移系统继续跑幂等的 ensure pass 后正常返回。
+
+### 用户可见更新
+- **第二次 sync 终于真的是空操作了** — 在一次 sync 中完成 commit、merge、push 之后，下一次没有新内容的 sync 之前还会因为 `ensure_gitignore` 每次都重写 `.gitignore` 而生成并 push 一个空 commit。现在仅在必需行实际变化时才写文件，干净的 sync 终于兑现了"第二次调用是 no-op"的承诺（#a1285b5）。
+- **旧客户端走 line-merge fallback 时不再被虚假冲突打断** — `last_reindex.json` 每次启动都会重写，跨设备 `git merge` 时会被双方同时修改而触发冲突。现在该文件被加入 ignore 列表，旧 fallback 路径顺利完成（#a1285b5）。
+
+### 开发者与治理更新
+- `core/git_backup::ensure_gitignore` 现在在必需行已存在时短路返回，文件 mtime 只在内容真的变化时才变化。必需列表新增 `.skills-manager/last_reindex.json`（每台机器的 reindex 缓存），避免它进入 commit 或触发合并冲突。
+- `core/migrations::run_migrations` 保留前向兼容契约：版本号更新的数据库不再被硬性拒绝——ensure pass 仍然跑，`user_version` 保持原值。相应测试同时钉住契约的两半。
+- 后端 Rust 测试套件：**401 passed; 0 failed**。
+
 ## [1.28.3] - 2026-07-13
 
 ### 发布概览
