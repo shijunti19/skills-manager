@@ -607,9 +607,12 @@ pub struct StripDescriptionsDto {
 #[tauri::command]
 pub async fn strip_agent_skill_descriptions(
     store: State<'_, Arc<SkillStore>>,
-    agent: String,
+    agent_key: String,
 ) -> Result<StripDescriptionsDto, AppError> {
     let store = store.inner().clone();
+    // `agent_key` (snake_case) is auto-converted to `agentKey` for the frontend,
+    // matching organize_agent_skills. Bind to `agent` so the body reads cleanly.
+    let agent = agent_key;
     tauri::async_runtime::spawn_blocking(move || -> Result<StripDescriptionsDto, AppError> {
         // Resolve + validate the adapter (mirrors organize_agent_skills).
         let adapter = adapter_for_agent(&store, &agent)?;

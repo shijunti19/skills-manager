@@ -845,6 +845,39 @@ export const bindSmartTagsToSkill = (skillId: string, smartTagIds: string[]) =>
 export const unbindSmartTagsFromSkill = (skillId: string) =>
   invoke<void>("unbind_smart_tags_from_skill", { skillId });
 
+/** A skill the AI suggested installing from github (from the import text's
+ *  `## 建议安装` section). The frontend installs these via `installGit`. */
+export interface SuggestedInstall {
+  name: string;
+  github: string;
+}
+
+/** Result of `importSmartTagsFromText`: counts, unmatched skill names, and
+ *  any skills the AI suggested installing from github. */
+export interface SmartTagImportResult {
+  tags_created: number;
+  bindings_created: number;
+  skills_unmatched: string[];
+  suggested_installs: SuggestedInstall[];
+}
+
+/**
+ * Replace the entire smart-tag set from a structured text blob. Atomically
+ * clears `smart_tags` + `skill_smart_tag_relations`, then rebuilds. Skills
+ * are matched by name; unmatched names are returned for the UI to surface.
+ *
+ * Text format:
+ * ```
+ * # 标签名
+ * 标签描述(可选)
+ *
+ * - 技能名: 介绍 | github | 目录
+ * - 技能名2: ...
+ * ```
+ */
+export const importSmartTagsFromText = (text: string) =>
+  invoke<SmartTagImportResult>("import_smart_tags_from_text", { text });
+
 // ── Agent skill organize (sync a tag's skills to an agent dir) ──
 
 export interface OrganizeResult {

@@ -3,6 +3,7 @@ import { Outlet, useNavigate } from "react-router-dom";
 import { Sidebar } from "./Sidebar";
 import { StatusBanner } from "./StatusBanner";
 import { CommandPalette } from "./CommandPalette";
+import { PromoBanner } from "./PromoBanner";
 import { useApp } from "../context/AppContext";
 import { useTranslation } from "react-i18next";
 import { useDragWindow } from "../hooks/useDragWindow";
@@ -40,9 +41,11 @@ export function Layout() {
         onMouseDown={onDrag}
         className="absolute inset-x-0 top-0 z-50 h-[28px] border-b border-border-subtle bg-bg-secondary"
       />
+      {/* Full-width promo strip — below the drag bar, above all content */}
+      <PromoBanner />
       <Sidebar />
       <div className="relative flex min-w-[600px] flex-1 flex-col overflow-hidden">
-        <div className="flex-1 overflow-y-auto px-5 pb-5 pt-[calc(28px+20px)] scrollbar-hide">
+        <div className="flex-1 overflow-y-auto px-5 pb-5 pt-[calc(58px+20px)] scrollbar-hide">
           <div className="mx-auto flex min-h-full max-w-[1200px] flex-col gap-4">
             {appError ? (
               <StatusBanner

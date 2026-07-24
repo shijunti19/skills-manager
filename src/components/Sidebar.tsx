@@ -379,8 +379,8 @@ export function Sidebar() {
   return (
     <>
       <div className="w-[220px] flex-shrink-0 bg-bg-secondary border-r border-border-subtle h-full flex flex-col select-none relative z-10">
-        {/* Traffic-light safe zone */}
-        <div className="h-[38px] shrink-0" />
+        {/* Traffic-light safe zone + promo banner clearance (28px drag bar + 30px banner) */}
+        <div className="h-[58px] shrink-0" />
         {/* App logo — sits below macOS window controls */}
         <div className="flex items-center px-3 gap-3 pb-2.5 shrink-0">
           <img

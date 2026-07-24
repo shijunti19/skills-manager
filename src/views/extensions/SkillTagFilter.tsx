@@ -6,6 +6,7 @@ import { cn } from "../../utils";
 import type { ManagedSkill, SmartTag, ToolInfo } from "../../lib/tauri";
 import * as api from "../../lib/tauri";
 import { PromptPreviewDialog } from "../../components/PromptPreviewDialog";
+import { ConfirmDialog } from "../../components/ConfirmDialog";
 import { assemblePrompt, DEFAULT_PROMPT_SPEC } from "./promptAssembly";
 
 interface SkillTagFilterProps {
@@ -44,6 +45,9 @@ export function SkillTagFilter({
   const [generatedText, setGeneratedText] = useState("");
   const [syncingAll, setSyncingAll] = useState(false);
   const [stripping, setStripping] = useState(false);
+  // Confirmation gates for the two destructive actions.
+  const [syncAllConfirmOpen, setSyncAllConfirmOpen] = useState(false);
+  const [stripConfirmOpen, setStripConfirmOpen] = useState(false);
 
   const selectedTags = useMemo(
     () => smartTags.filter((tag) => selectedTagIds.includes(tag.id)),
@@ -208,7 +212,7 @@ export function SkillTagFilter({
           {agentKey && (
             <button
               type="button"
-              onClick={() => void handleSyncAll()}
+              onClick={() => setSyncAllConfirmOpen(true)}
               disabled={syncingAll || tagSkills.length === 0}
               className="inline-flex items-center gap-1.5 rounded-md border border-border-subtle bg-surface px-2.5 py-1 text-[12px] font-medium text-secondary transition hover:bg-surface-hover disabled:cursor-not-allowed disabled:opacity-50"
               title={t("promptPreview.syncAllToAgent", { agent: agent?.display_name ?? "" })}
@@ -220,7 +224,7 @@ export function SkillTagFilter({
           {agentKey && (
             <button
               type="button"
-              onClick={() => void handleStripDescriptions()}
+              onClick={() => setStripConfirmOpen(true)}
               disabled={stripping}
               className="inline-flex items-center gap-1.5 rounded-md border border-border-subtle bg-surface px-2.5 py-1 text-[12px] font-medium text-secondary transition hover:bg-surface-hover disabled:cursor-not-allowed disabled:opacity-50"
               title={t("promptPreview.stripDescriptionsHint")}
@@ -237,6 +241,29 @@ export function SkillTagFilter({
         generatedText={generatedText}
         onClose={() => setPromptOpen(false)}
         onRegenerate={handleGenerate}
+      />
+      <ConfirmDialog
+        open={syncAllConfirmOpen}
+        tone="warning"
+        title={t("promptPreview.syncAllConfirmTitle")}
+        message={t("promptPreview.syncAllConfirmMessage", {
+          agent: agent?.display_name ?? agentKey ?? "",
+          count: tagSkills.length,
+        })}
+        confirmLabel={t("promptPreview.syncAllConfirmAction")}
+        onClose={() => setSyncAllConfirmOpen(false)}
+        onConfirm={handleSyncAll}
+      />
+      <ConfirmDialog
+        open={stripConfirmOpen}
+        tone="warning"
+        title={t("promptPreview.stripConfirmTitle")}
+        message={t("promptPreview.stripConfirmMessage", {
+          agent: agent?.display_name ?? agentKey ?? "",
+        })}
+        confirmLabel={t("promptPreview.stripConfirmAction")}
+        onClose={() => setStripConfirmOpen(false)}
+        onConfirm={handleStripDescriptions}
       />
     </>
   );

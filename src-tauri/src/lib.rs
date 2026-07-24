@@ -1059,6 +1059,7 @@ pub fn run() {
             commands::smart_tags::get_smart_tag_ids_for_skill,
             commands::smart_tags::bind_smart_tags_to_skill,
             commands::smart_tags::unbind_smart_tags_from_skill,
+            commands::smart_tags::import_smart_tags_from_text,
             // Sync
             commands::sync::sync_skill_to_tool,
             commands::sync::unsync_skill_from_tool,

@@ -11,7 +11,7 @@ use tauri::State;
 
 use crate::core::{
     error::AppError,
-    skill_store::{SmartTagRecord, SkillStore},
+    skill_store::{SmartTagImportEntry, SmartTagRecord, SkillStore},
 };
 
 /// Frontend-facing smart tag DTO. `agents` is surfaced as a parsed Vec so
@@ -211,6 +211,222 @@ pub async fn unbind_smart_tags_from_skill(
         store
             .set_smart_tags_for_skill(&skill_id, &[])
             .map_err(AppError::db)
+    })
+    .await?
+}
+
+// ── Import / export as text ─────────────────────────────────────────────
+
+/// A suggested install parsed from the import text's `## 建议安装` /
+/// `## Suggested installs` section. The frontend installs these via git.
+#[derive(Debug, Clone, Serialize)]
+pub struct SuggestedInstall {
+    pub name: String,
+    pub github: String,
+}
+
+/// Result of an import: counts plus any skill names that didn't resolve to a
+/// managed skill (so the frontend can surface them), and any skills the AI
+/// suggested installing from github.
+#[derive(Debug, Serialize)]
+pub struct ImportResult {
+    pub tags_created: usize,
+    pub bindings_created: usize,
+    pub skills_unmatched: Vec<String>,
+    pub suggested_installs: Vec<SuggestedInstall>,
+}
+
+/// One parsed tag block from the import text: its text fields and the list
+/// of skill *names* (not yet resolved to ids) that appear under it.
+struct ParsedTagBlock {
+    name: String,
+    description: Option<String>,
+    skill_names: Vec<String>,
+}
+
+/// Parsed output of the import text: tag blocks + any suggested installs.
+struct ParsedImport {
+    blocks: Vec<ParsedTagBlock>,
+    suggested: Vec<SuggestedInstall>,
+}
+
+/// True when a `##` heading marks the "suggested installs" section. Matches
+/// the section names used by the skills-list instruction in any locale.
+fn is_suggested_section(heading: &str) -> bool {
+    let h = heading.trim().to_lowercase();
+    h == "建议安装"
+        || h == "建議安裝"
+        || h == "suggested installs"
+        || h == "suggested installs:"
+        || h == "suggested"
+        || h.contains("建议安装")
+        || h.contains("建議安裝")
+        || h.contains("suggested install")
+}
+
+/// Parse the import text into tag blocks + suggested installs. Format:
+/// ```text
+/// # 标签名
+/// 描述行(可选,多行)
+///
+/// - 技能名: 介绍 | github | 目录
+/// - 技能名2: ...
+///
+/// ## 建议安装
+/// - 技能名: https://github.com/owner/repo
+/// ```
+/// Lines starting with `##` (double-hash) open a special section — currently
+/// only "建议安装"/"Suggested installs" is recognized, whose items are parsed
+/// as `name: github` pairs for the frontend to install. Lines starting with a
+/// single `#` open a normal tag. Lines starting with `-` are skill bindings.
+fn parse_import_text(text: &str) -> Result<ParsedImport, AppError> {
+    let mut blocks: Vec<ParsedTagBlock> = Vec::new();
+    let mut desc_lines: Vec<String> = Vec::new();
+    let mut suggested: Vec<SuggestedInstall> = Vec::new();
+    // When inside a `## 建议安装` section, list items go to `suggested`
+    // instead of the current tag block.
+    let mut in_suggested_section = false;
+
+    for raw in text.lines() {
+        let line = raw.trim_end();
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        // Double-hash heading: a special section, NOT a tag.
+        if let Some(rest) = trimmed.strip_prefix("##") {
+            // Flush the previous block's description before switching context.
+            if let Some(last) = blocks.last_mut() {
+                if !desc_lines.is_empty() {
+                    last.description = Some(desc_lines.join("\n"));
+                    desc_lines.clear();
+                }
+            }
+            in_suggested_section = is_suggested_section(rest);
+            // Unknown ## sections are simply ignored (treated as comments).
+            continue;
+        }
+        if let Some(rest) = trimmed.strip_prefix('#') {
+            let name = rest.trim().to_string();
+            if name.is_empty() {
+                return Err(AppError::invalid_input(
+                    "encountered a '#' heading with an empty tag name",
+                ));
+            }
+            // A single-hash tag heading exits the suggested-install section.
+            in_suggested_section = false;
+            // Flush the previous block's description before starting a new one.
+            if let Some(last) = blocks.last_mut() {
+                if !desc_lines.is_empty() {
+                    last.description = Some(desc_lines.join("\n"));
+                    desc_lines.clear();
+                }
+            }
+            blocks.push(ParsedTagBlock {
+                name,
+                description: None,
+                skill_names: Vec::new(),
+            });
+            continue;
+        }
+        if trimmed.starts_with('-') || trimmed.starts_with('•') {
+            let body = trimmed
+                .trim_start_matches(['-', '•', ' ', '*', '+'])
+                .trim();
+            if in_suggested_section {
+                // "技能名: github" — split on the first ':'.
+                if let Some(idx) = body.find(':') {
+                    let name = body[..idx].trim().to_string();
+                    let github = body[idx + 1..].trim().to_string();
+                    if !name.is_empty() && !github.is_empty() {
+                        suggested.push(SuggestedInstall { name, github });
+                    }
+                }
+                continue;
+            }
+            // Skill name is the segment before the first ':' (or '|' if no colon).
+            let skill_name = body
+                .split([':', '|'])
+                .next()
+                .unwrap_or("")
+                .trim()
+                .to_string();
+            if !skill_name.is_empty() {
+                if let Some(last) = blocks.last_mut() {
+                    last.skill_names.push(skill_name);
+                }
+            }
+            continue;
+        }
+        // Any other non-empty line is description text for the current block.
+        if !in_suggested_section && blocks.last().is_some() {
+            desc_lines.push(line.to_string());
+        }
+    }
+    // Flush trailing description onto the last block.
+    if let Some(last) = blocks.last_mut() {
+        if !desc_lines.is_empty() {
+            last.description = Some(desc_lines.join("\n"));
+        }
+    }
+
+    if blocks.is_empty() {
+        return Err(AppError::invalid_input(
+            "no tags found — text must contain at least one '# 标签名' heading",
+        ));
+    }
+    Ok(ParsedImport { blocks, suggested })
+}
+
+/// Import (replace) the full smart-tag set from a structured text blob.
+/// Atomically clears `smart_tags` + `skill_smart_tag_relations`, then
+/// rebuilds from the parsed text. Skills are matched by name against the
+/// managed library; unmatched names are returned for the UI to surface.
+#[tauri::command]
+pub async fn import_smart_tags_from_text(
+    text: String,
+    store: State<'_, Arc<SkillStore>>,
+) -> Result<ImportResult, AppError> {
+    let store = store.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let parsed = parse_import_text(&text)?;
+
+        // Resolve skill names -> ids, collecting unmatched names.
+        let mut entries: Vec<SmartTagImportEntry> = Vec::with_capacity(parsed.blocks.len());
+        let mut unmatched: Vec<String> = Vec::new();
+        let mut unmatched_seen = std::collections::HashSet::new();
+        for block in parsed.blocks {
+            let mut skill_ids: Vec<String> = Vec::new();
+            for name in &block.skill_names {
+                match store.get_skill_id_by_name(name) {
+                    Ok(Some(id)) => skill_ids.push(id),
+                    _ => {
+                        if unmatched_seen.insert(name.clone()) {
+                            unmatched.push(name.clone());
+                        }
+                    }
+                }
+            }
+            entries.push(SmartTagImportEntry {
+                name: block.name,
+                description: block.description,
+                prompt: None,
+                skill_ids,
+            });
+        }
+
+        // Clear then rebuild, inside the bulk insert's own transaction.
+        store.clear_all_smart_tags().map_err(AppError::db)?;
+        let (tags_created, bindings_created) = store
+            .bulk_import_smart_tags(&entries)
+            .map_err(AppError::db)?;
+
+        Ok(ImportResult {
+            tags_created,
+            bindings_created,
+            skills_unmatched: unmatched,
+            suggested_installs: parsed.suggested,
+        })
     })
     .await?
 }

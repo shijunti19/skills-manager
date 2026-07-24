@@ -1,11 +1,11 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { Tags, Plus, Pencil, Trash2, X, Loader2, Search, AlertCircle } from "lucide-react";
+import { Tags, Plus, Pencil, Trash2, X, Loader2, Search, AlertCircle, Upload } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
 import { cn } from "../utils";
 import { useApp } from "../context/AppContext";
 import * as api from "../lib/tauri";
-import type { ManagedSkill, SmartTag } from "../lib/tauri";
+import type { ManagedSkill, SmartTag, SmartTagImportResult } from "../lib/tauri";
 import { ConfirmDialog } from "../components/ConfirmDialog";
 import { getErrorMessage } from "../lib/error";
 
@@ -39,6 +39,10 @@ export function TagsView() {
   const [deleteTarget, setDeleteTarget] = useState<SmartTag | null>(null);
   const [saving, setSaving] = useState(false);
   const [skillSearch, setSkillSearch] = useState("");
+  const [importOpen, setImportOpen] = useState(false);
+  const [importText, setImportText] = useState("");
+  const [importConfirmOpen, setImportConfirmOpen] = useState(false);
+  const [importing, setImporting] = useState(false);
 
   const loadAll = useCallback(async () => {
     setLoading(true);
@@ -295,6 +299,106 @@ export function TagsView() {
     }
   };
 
+  // Export current tags + bindings as the import format text, so the import
+  // dialog can pre-fill with the existing state for in-place editing.
+  const exportTagsAsText = useCallback((): string => {
+    if (tags.length === 0) return "";
+    const lines: string[] = [];
+    for (const tag of tags) {
+      lines.push(`# ${tag.name}`);
+      if (tag.description) lines.push(tag.description);
+      // skills bound to this tag
+      const boundNames: string[] = [];
+      for (const [skillId, tagIds] of Object.entries(smartTagsMap)) {
+        if (tagIds.includes(tag.id)) {
+          const skill = skillsById[skillId];
+          if (skill) boundNames.push(skill.name);
+        }
+      }
+      boundNames.sort((a, b) => a.localeCompare(b));
+      if (boundNames.length > 0) {
+        if (tag.description) lines.push(""); // blank line before list
+        for (const n of boundNames) lines.push(`- ${n}`);
+      }
+      lines.push("");
+    }
+    return lines.join("\n").trimEnd();
+  }, [tags, smartTagsMap, skillsById]);
+
+  const openImport = () => {
+    setImportText(exportTagsAsText());
+    setImportOpen(true);
+  };
+
+  const handleImport = async () => {
+    const text = importText.trim();
+    if (!text) {
+      toast.error(t("tags.importEmpty"));
+      return;
+    }
+    setImporting(true);
+    try {
+      const result: SmartTagImportResult = await api.importSmartTagsFromText(text);
+      if (result.skills_unmatched.length > 0) {
+        toast.warning(
+          t("tags.importSuccessWithUnmatched", {
+            tags: result.tags_created,
+            bindings: result.bindings_created,
+            count: result.skills_unmatched.length,
+          }),
+        );
+      } else {
+        toast.success(
+          t("tags.importSuccess", {
+            tags: result.tags_created,
+            bindings: result.bindings_created,
+          }),
+        );
+      }
+      setImportOpen(false);
+      await loadAll();
+
+      // If the AI suggested installing skills from github, install them now
+      // (one by one). Failures don't abort the rest — each is reported.
+      const suggested = result.suggested_installs ?? [];
+      if (suggested.length > 0) {
+        const installingId = "tags-import-installing";
+        toast.loading(
+          t("tags.installingSuggested", { count: suggested.length }),
+          { id: installingId },
+        );
+        let ok = 0;
+        let fail = 0;
+        for (const item of suggested) {
+          try {
+            await api.installGit(item.github, item.name);
+            ok += 1;
+          } catch {
+            fail += 1;
+          }
+        }
+        if (fail === 0) {
+          toast.success(
+            t("tags.installingSuggestedDone", { count: ok }),
+            { id: installingId },
+          );
+        } else {
+          toast.warning(
+            t("tags.installingSuggestedPartial", { ok, fail }),
+            { id: installingId },
+          );
+        }
+        // Reload skills so the freshly-installed ones show up.
+        await loadAll();
+      }
+    } catch (e) {
+      toast.error(getErrorMessage(e, t("tags.importFailed")));
+    } finally {
+      setImporting(false);
+      setImportConfirmOpen(false);
+    }
+  };
+
   return (
     <div className="app-page app-page-narrow">
       <div className="app-page-header">
@@ -306,13 +410,23 @@ export function TagsView() {
         <span className="text-[13px] text-muted">
           {t("tags.countSummary", { count: tags.length })}
         </span>
-        <button
-          onClick={openCreate}
-          className="inline-flex items-center gap-1.5 rounded-md bg-accent px-3 py-1.5 text-[13px] font-medium text-white transition-colors hover:bg-accent-hover"
-        >
-          <Plus className="h-3.5 w-3.5" />
-          {t("tags.newTag")}
-        </button>
+        <div className="flex items-center gap-2">
+          <button
+            onClick={openImport}
+            className="inline-flex items-center gap-1.5 rounded-md border border-border-subtle bg-surface px-3 py-1.5 text-[13px] font-medium text-secondary transition-colors hover:bg-surface-hover"
+            title={t("tags.importHint")}
+          >
+            <Upload className="h-3.5 w-3.5" />
+            {t("tags.import")}
+          </button>
+          <button
+            onClick={openCreate}
+            className="inline-flex items-center gap-1.5 rounded-md bg-accent px-3 py-1.5 text-[13px] font-medium text-white transition-colors hover:bg-accent-hover"
+          >
+            <Plus className="h-3.5 w-3.5" />
+            {t("tags.newTag")}
+          </button>
+        </div>
       </div>
 
       {loading ? (
@@ -567,6 +681,78 @@ export function TagsView() {
         message={t("tags.deleteConfirm", { name: deleteTarget?.name ?? "" })}
         onClose={() => setDeleteTarget(null)}
         onConfirm={handleDelete}
+      />
+
+      {/* Import modal: paste structured text, clears + rebuilds all tags */}
+      {importOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
+          <div className="flex max-h-[88vh] w-full max-w-2xl flex-col rounded-lg border border-border bg-bg-secondary shadow-xl">
+            <div className="flex items-center justify-between border-b border-border-subtle px-5 py-3">
+              <h2 className="flex items-center gap-2 text-[15px] font-semibold text-primary">
+                <Upload className="h-4 w-4 text-accent-light" />
+                {t("tags.importTitle")}
+              </h2>
+              <button
+                onClick={() => setImportOpen(false)}
+                className="rounded p-1 text-faint transition hover:text-secondary"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+
+            <div className="flex-1 space-y-3 overflow-y-auto px-5 py-4">
+              <div className="rounded-md border border-border-subtle bg-surface/70 px-3 py-2 text-[12px] leading-relaxed text-muted">
+                <p className="mb-1 font-medium text-secondary">{t("tags.importFormatTitle")}</p>
+                <pre className="whitespace-pre-wrap break-words font-mono text-[11px] text-tertiary">
+{t("tags.importFormatExample")}
+                </pre>
+                <p className="mt-1.5 text-faint">{t("tags.importFormatNote")}</p>
+              </div>
+              <div>
+                <label className="app-section-title mb-1.5 block">
+                  {t("tags.importContentLabel")}
+                </label>
+                <textarea
+                  value={importText}
+                  onChange={(e) => setImportText(e.target.value)}
+                  placeholder={t("tags.importContentPlaceholder")}
+                  rows={14}
+                  className="w-full resize-y rounded-md border border-border-subtle bg-surface px-3 py-2 font-mono text-[12px] leading-relaxed text-primary focus:border-accent focus:outline-none"
+                />
+              </div>
+            </div>
+
+            <div className="flex items-center justify-between gap-3 border-t border-border-subtle px-5 py-3">
+              <span className="text-[11px] text-faint">{t("tags.importWarning")}</span>
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={() => setImportOpen(false)}
+                  className="rounded-md border border-border-subtle bg-surface px-3 py-1.5 text-[13px] font-medium text-secondary transition hover:bg-surface-hover"
+                >
+                  {t("common.cancel")}
+                </button>
+                <button
+                  onClick={() => setImportConfirmOpen(true)}
+                  disabled={!importText.trim() || importing}
+                  className="inline-flex items-center gap-1.5 rounded-md bg-accent px-3 py-1.5 text-[13px] font-medium text-white transition hover:bg-accent-hover disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  <Upload className="h-3.5 w-3.5" />
+                  {t("tags.importSave")}
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      <ConfirmDialog
+        open={importConfirmOpen}
+        tone="warning"
+        title={t("tags.importConfirmTitle")}
+        message={t("tags.importConfirmMessage")}
+        confirmLabel={t("tags.importConfirmAction")}
+        onClose={() => setImportConfirmOpen(false)}
+        onConfirm={handleImport}
       />
     </div>
   );

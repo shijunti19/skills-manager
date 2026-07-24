@@ -126,6 +126,17 @@ pub struct SmartTagRecord {
     pub updated_at: i64,
 }
 
+/// A parsed tag entry from the import-text flow: the tag's text fields plus
+/// the already-resolved skill ids that should bind to it. Skill ids are
+/// resolved by the command layer (which knows the skill name -> id map).
+#[derive(Debug, Clone)]
+pub struct SmartTagImportEntry {
+    pub name: String,
+    pub description: Option<String>,
+    pub prompt: Option<String>,
+    pub skill_ids: Vec<String>,
+}
+
 impl SkillStore {
     pub fn new(db_path: &PathBuf) -> Result<Self> {
         let conn = Connection::open(db_path)?;
@@ -1624,6 +1635,90 @@ impl SkillStore {
             map.entry(row.0).or_default().push(row.1);
         }
         Ok(map)
+    }
+
+    /// Wipe both smart-tag tables: all smart_tags and all skill bindings.
+    /// Used by the "import from text" flow, which clears then rebuilds. Runs
+    /// inside a single transaction so a failure leaves the previous state
+    /// intact. Does NOT touch the `skills` table or simple `skill_tags`.
+    pub fn clear_all_smart_tags(&self) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        let tx = conn.unchecked_transaction()?;
+        tx.execute("DELETE FROM skill_smart_tag_relations", [])?;
+        tx.execute("DELETE FROM smart_tags", [])?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Look up a skill id by its name (exact, trimmed match).
+    pub fn get_skill_id_by_name(&self, name: &str) -> Result<Option<String>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare("SELECT id FROM skills WHERE name = ?1")?;
+        let mut rows = stmt.query_map(params![name], |row| row.get::<_, String>(0))?;
+        Ok(rows.next().and_then(|r| r.ok()))
+    }
+
+    /// Bulk-insert smart tags and their skill bindings in one transaction.
+    /// Each entry carries: tag name, description, prompt, and a list of
+    /// skill_ids to bind. `sort_order` follows the slice order. Tag ids are
+    /// generated as `tag-import-<idx>` for stable, re-importable ids.
+    /// Returns (tags_created, bindings_created).
+    pub fn bulk_import_smart_tags(
+        &self,
+        entries: &[SmartTagImportEntry],
+    ) -> Result<(usize, usize)> {
+        let conn = self.conn.lock().unwrap();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        let tx = conn.unchecked_transaction()?;
+
+        let mut tags_created = 0usize;
+        let mut bindings_created = 0usize;
+        for (idx, entry) in entries.iter().enumerate() {
+            let id = format!("tag-import-{}", idx + 1);
+            let agents = "[]";
+            tx.execute(
+                "INSERT INTO smart_tags
+                    (id, name, agents, description, prompt, sort_order, created_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7)",
+                params![
+                    id,
+                    entry.name,
+                    agents,
+                    entry.description,
+                    entry.prompt,
+                    idx as i32,
+                    now,
+                ],
+            )?;
+            tags_created += 1;
+
+            for skill_id in &entry.skill_ids {
+                let trimmed = skill_id.trim();
+                if trimmed.is_empty() {
+                    continue;
+                }
+                // See set_smart_tags_for_skill: try the created_at shape first
+                // (forward-compat), fall back to 2-column shape on fresh schema.
+                let res = tx.execute(
+                    "INSERT OR IGNORE INTO skill_smart_tag_relations
+                        (skill_id, smart_tag_id, created_at) VALUES (?1, ?2, ?3)",
+                    params![trimmed, id, now],
+                );
+                if res.is_err() {
+                    tx.execute(
+                        "INSERT OR IGNORE INTO skill_smart_tag_relations
+                            (skill_id, smart_tag_id) VALUES (?1, ?2)",
+                        params![trimmed, id],
+                    )?;
+                }
+                bindings_created += 1;
+            }
+        }
+        tx.commit()?;
+        Ok((tags_created, bindings_created))
     }
 
     // ── Audit log ──

@@ -68,14 +68,12 @@ export function PromptPreviewDialog({
   };
 
   const handleRegenerate = () => {
-    // Clear the cached task and let the parent rebuild the generated text.
-    try {
-      localStorage.removeItem(TASK_DRAFT_KEY);
-    } catch {
-      /* ignore */
-    }
-    setTaskDraft("");
+    // Only rebuild the generated prompt above — keep the user's task draft intact.
     onRegenerate();
+  };
+
+  const handleClearTask = () => {
+    handleTaskChange("");
   };
 
   return (
@@ -93,14 +91,6 @@ export function PromptPreviewDialog({
             </p>
           </div>
           <div className="flex items-center gap-2">
-            <button
-              type="button"
-              onClick={handleCopyAll}
-              className="inline-flex items-center gap-1.5 rounded-lg bg-accent px-3 py-1.5 text-[12px] font-medium text-white transition hover:bg-accent-hover"
-            >
-              <Copy className="h-3.5 w-3.5" />
-              {copied ? t("promptPreview.copied") : t("promptPreview.copyAll")}
-            </button>
             <button
               type="button"
               onClick={onClose}
@@ -126,28 +116,51 @@ export function PromptPreviewDialog({
             <p className="mb-1.5 text-[11px] font-medium uppercase tracking-wider text-faint">
               {t("promptPreview.taskLabel")}
             </p>
-            <textarea
-              value={taskDraft}
-              onChange={(e) => handleTaskChange(e.target.value)}
-              placeholder={t("promptPreview.taskPlaceholder")}
-              rows={5}
-              className="w-full resize-y rounded-lg border border-border-subtle bg-surface px-3 py-2.5 text-[13px] leading-5 text-primary placeholder:text-faint focus:border-accent focus:outline-none focus:ring-1 focus:ring-accent"
-            />
+            <div className="relative">
+              <textarea
+                value={taskDraft}
+                onChange={(e) => handleTaskChange(e.target.value)}
+                placeholder={t("promptPreview.taskPlaceholder")}
+                rows={5}
+                className="w-full resize-y rounded-lg border border-border-subtle bg-surface px-3 pb-8 pt-2.5 text-[13px] leading-5 text-primary placeholder:text-faint focus:border-accent focus:outline-none focus:ring-1 focus:ring-accent"
+              />
+              {taskDraft && (
+                <button
+                  type="button"
+                  onClick={handleClearTask}
+                  title={t("promptPreview.clearTask")}
+                  aria-label={t("promptPreview.clearTask")}
+                  className="absolute bottom-2 right-2 inline-flex h-5 w-5 items-center justify-center rounded-full border border-border-subtle bg-bg-secondary text-muted transition hover:border-border hover:text-secondary"
+                >
+                  <X className="h-3 w-3" />
+                </button>
+              )}
+            </div>
           </div>
         </div>
 
         {/* Footer */}
         <div className="flex items-center justify-between gap-3 border-t border-border-subtle px-5 py-3">
-          <span className="text-[11px] text-faint">
-            {t("promptPreview.cacheHint")}
-          </span>
+          <div className="flex items-center gap-3">
+            <button
+              type="button"
+              onClick={handleRegenerate}
+              className="inline-flex items-center gap-1.5 rounded-lg border border-border-subtle bg-surface px-3 py-1.5 text-[12px] font-medium text-secondary transition hover:bg-surface-hover"
+            >
+              <RefreshCw className="h-3.5 w-3.5" />
+              {t("promptPreview.regenerate")}
+            </button>
+            <span className="text-[11px] text-faint">
+              {t("promptPreview.cacheHint")}
+            </span>
+          </div>
           <button
             type="button"
-            onClick={handleRegenerate}
-            className="inline-flex items-center gap-1.5 rounded-lg border border-border-subtle bg-surface px-3 py-1.5 text-[12px] font-medium text-secondary transition hover:bg-surface-hover"
+            onClick={handleCopyAll}
+            className="inline-flex items-center gap-1.5 rounded-lg bg-accent px-3 py-1.5 text-[12px] font-medium text-white transition hover:bg-accent-hover"
           >
-            <RefreshCw className="h-3.5 w-3.5" />
-            {t("promptPreview.regenerate")}
+            <Copy className="h-3.5 w-3.5" />
+            {copied ? t("promptPreview.copied") : t("promptPreview.copyAll")}
           </button>
         </div>
       </div>
