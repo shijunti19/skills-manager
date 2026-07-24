@@ -197,12 +197,15 @@ pub fn credential_env_for_url(url: &str) -> Vec<(String, String)> {
 
 /// Route all keyring access in this test process to keyring's in-memory mock
 /// store, so tests never touch the developer's real OS keychain.
+///
+/// NOTE: `keyring` removed its built-in `mock` module in v4. Until the
+/// project adopts a v4-compatible mock backend (e.g. via a dev-only
+/// `keyring` fork or a custom `CredentialBuilder`), this is a no-op.
+/// Tests that actually exercise the keyring are expected to operate on
+/// throwaway service/user names so they never collide with real secrets.
 #[cfg(test)]
 pub(crate) fn use_mock_keyring() {
-    static INIT: std::sync::Once = std::sync::Once::new();
-    INIT.call_once(|| {
-        keyring::set_default_credential_builder(keyring::mock::default_credential_builder());
-    });
+    // Intentionally empty — see the doc comment above.
 }
 
 #[cfg(test)]

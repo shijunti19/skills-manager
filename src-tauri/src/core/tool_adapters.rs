@@ -977,6 +977,7 @@ mod tests {
                 skills_dir: tmp.path().join("legacy-skills").to_string_lossy().into_owned(),
                 project_relative_skills_dir: Some(".legacy/skills".to_string()),
                 category: ToolCategory::Lobster,
+                skills_prompt_spec: None,
             },
             CustomToolDef {
                 key: "custom_agent".to_string(),
@@ -984,6 +985,7 @@ mod tests {
                 skills_dir: custom_skills.to_string_lossy().into_owned(),
                 project_relative_skills_dir: Some(custom_project_path.to_string()),
                 category: ToolCategory::Lobster,
+                skills_prompt_spec: None,
             },
         ];
         store

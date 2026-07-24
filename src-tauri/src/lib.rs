@@ -770,9 +770,23 @@ pub fn quit_app(app: &tauri::AppHandle) {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // Install the panic hook as the very first statement, before
+    // `initialize_store_minimal()` and before `tauri::Builder` exist. This
+    // covers the pre-Builder startup window that previously had zero
+    // observability — a panic or hang there left no `last_panic.log` and no
+    // log line, which is why startup failures were un-diagnosable.
+    core::panic_log::install_panic_hook_early();
+
     let pre_builder_start = Instant::now();
-    let (store, startup_timings) =
-        core::app_state::initialize_store().expect("Failed to initialize app state");
+    // Minimal init only (central repo + DB open + legacy migration): well under
+    // a second, so the window comes up immediately and the frontend's first IPC
+    // (e.g. `getSettings` for i18n) responds instantly. The expensive
+    // sync-metadata reindex runs afterwards in the background — see the
+    // spawn_blocking in `setup` below. Previously this called `initialize_store`
+    // synchronously, which blocked the window for 40-100s on `reindex_from_metadata`
+    // and stalled the frontend's i18n IPC for ~38s (long white screen).
+    let store = core::app_state::initialize_store_minimal()
+        .expect("Failed to initialize app state");
     let pre_builder_ms = pre_builder_start.elapsed().as_millis();
     let store_for_setup = store.clone();
 
@@ -819,7 +833,7 @@ pub fn run() {
                     .build(),
             )?;
 
-            core::panic_log::install_panic_hook(app.handle().clone());
+            // (panic hook already installed as the first statement of run().)
             log::info!(
                 "app start: version={} os={} arch={}",
                 app.config().version.clone().unwrap_or_default(),
@@ -831,7 +845,14 @@ pub fn run() {
                 pre_builder_ms,
                 builder_to_setup_ms
             );
-            startup_timings.log();
+
+            // Flush the early-startup progress lines stashed before the logger
+            // existed (initialize_store_minimal + the background reindex below).
+            // This is what makes the pre-Builder window observable: without it,
+            // a hang in reindex left zero log evidence.
+            for line in core::app_state::take_early_progress() {
+                log::info!("{line}");
+            }
 
             // Flush any errors stashed while resolving the central repo — that
             // ran before this logger existed, so its own log calls were no-ops
@@ -858,6 +879,52 @@ pub fn run() {
                         repaired,
                         step.elapsed().as_millis()
                     );
+                }
+            });
+
+            // Background the sync-metadata reindex + scenario application that
+            // previously ran synchronously before the window was created and
+            // blocked it for 40-100s. The DB already holds the last session's
+            // reindexed state, so the window renders immediately and the
+            // frontend's first IPC responds instantly; this task reconciles any
+            // changes an external device wrote to the shared metadata dir and
+            // then tells the frontend to refresh. On the warm path this is
+            // near-instant. Failures are logged inside the helper and never
+            // propagated — a background reindex error must not crash an
+            // already-running app.
+            let store_for_reindex = store_for_setup.clone();
+            let app_for_reindex = app.handle().clone();
+            tauri::async_runtime::spawn_blocking(move || {
+                let step = Instant::now();
+                let outcome = core::app_state::run_reindex_if_needed(&store_for_reindex);
+                match outcome {
+                    core::app_state::ReindexOutcome::Ran => {
+                        // Re-flush any progress lines the reindex stashed after
+                        // the initial flush above.
+                        for line in core::app_state::take_early_progress() {
+                            log::info!("{line}");
+                        }
+                        log::info!(
+                            "startup: background reindex ran in {} ms — emitting refresh",
+                            step.elapsed().as_millis()
+                        );
+                        // Tell the frontend to re-fetch managed skills / tools
+                        // so it reflects whatever the reindex reconciled. The
+                        // existing listener path (AppContext.tsx) refreshes on
+                        // this event already.
+                        if let Err(err) = app_for_reindex.emit("app-files-changed", ()) {
+                            log::warn!("startup: failed to emit post-reindex refresh: {err}");
+                        }
+                    }
+                    core::app_state::ReindexOutcome::SkippedNoMetadata => {
+                        for line in core::app_state::take_early_progress() {
+                            log::info!("{line}");
+                        }
+                        log::debug!(
+                            "startup: background reindex skipped (no sync metadata) in {} ms",
+                            step.elapsed().as_millis()
+                        );
+                    }
                 }
             });
 
@@ -1069,6 +1136,7 @@ pub fn run() {
             commands::agent_workspace::import_global_local_skill_to_center,
             commands::agent_workspace::update_global_local_skill_from_center,
             commands::agent_workspace::delete_global_local_skill,
+            commands::agent_workspace::strip_agent_skill_descriptions,
             // Presets
             commands::presets::get_presets,
             commands::presets::get_active_preset,

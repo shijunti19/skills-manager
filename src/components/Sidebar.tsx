@@ -16,6 +16,7 @@ import {
   Link2,
   ChevronDown,
   ChevronRight,
+  Tags,
 } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
@@ -167,6 +168,7 @@ export function Sidebar() {
   const NAV_ITEMS = [
     { name: t("sidebar.dashboard"), path: "/", icon: LayoutDashboard },
     { name: t("sidebar.mySkills"), path: "/my-skills", icon: Layers },
+    { name: t("sidebar.tags"), path: "/tags", icon: Tags },
     { name: t("sidebar.installSkills"), path: "/install", icon: Download },
     { name: t("sidebar.backup"), path: "/backup", icon: CloudUpload },
   ];

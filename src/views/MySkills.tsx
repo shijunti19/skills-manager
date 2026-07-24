@@ -22,8 +22,12 @@ import {
   CircleSlash,
   Pencil,
   Trash2,
+  Copy,
+  Check,
+  AlignLeft,
 } from "lucide-react";
 import { open as dialogOpen } from "@tauri-apps/plugin-dialog";
+import { writeText as clipboardWriteText } from "@tauri-apps/plugin-clipboard-manager";
 import { useNavigate } from "react-router-dom";
 import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
@@ -110,6 +114,109 @@ function getToolDisplayName(toolKey: string, tools: ToolInfo[]) {
   return tools.find((tool) => tool.key === toolKey)?.display_name || toolKey;
 }
 
+interface SkillListEntry {
+  name: string;
+  description: string | null;
+}
+
+/**
+ * Modal that lists every skill as "name: description" (one per line) and
+ * offers "copy all" so the list can be pasted into an AI context.
+ */
+function SkillsListDialog({
+  open,
+  entries,
+  onClose,
+}: {
+  open: boolean;
+  entries: SkillListEntry[];
+  onClose: () => void;
+}) {
+  const { t } = useTranslation();
+  const [copied, setCopied] = useState(false);
+
+  if (!open) return null;
+
+  const lines = entries.map((e) => `${e.name}: ${e.description || "-"}`);
+  const text = lines.join("\n");
+
+  const handleCopy = async () => {
+    try {
+      await clipboardWriteText(text);
+      setCopied(true);
+      toast.success(t("mySkills.copiedToClipboard"));
+      window.setTimeout(() => setCopied(false), 1500);
+    } catch (error: unknown) {
+      toast.error(getErrorMessage(error, t("common.error")));
+    }
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+      <div
+        className="dialog-fade absolute inset-0 bg-black/40 backdrop-blur-sm"
+        onClick={onClose}
+      />
+      <div className="dialog-pop relative flex max-h-[80vh] w-full max-w-2xl flex-col overflow-hidden rounded-lg border border-border bg-surface shadow-2xl">
+        <div className="flex items-center justify-between border-b border-border-subtle px-5 py-3">
+          <h2 className="flex items-center gap-2 text-[15px] font-semibold text-primary">
+            <AlignLeft className="h-4 w-4 text-accent-light" />
+            {t("mySkills.skillsListTitle")}
+            <span className="text-[12px] font-normal text-muted">
+              {t("mySkills.skillsListSummary", { count: entries.length })}
+            </span>
+          </h2>
+          <button
+            onClick={onClose}
+            className="rounded p-1 text-faint transition-colors hover:text-secondary"
+            title={t("common.close")}
+          >
+            <X className="h-4 w-4" />
+          </button>
+        </div>
+
+        <div className="flex-1 overflow-y-auto px-5 py-4">
+          {entries.length === 0 ? (
+            <p className="py-8 text-center text-[13px] text-faint">
+              {t("mySkills.skillsListEmpty")}
+            </p>
+          ) : (
+            <pre className="whitespace-pre-wrap break-words rounded-md bg-surface-hover/60 p-3 font-mono text-[12px] leading-[20px] text-secondary">
+              {text}
+            </pre>
+          )}
+        </div>
+
+        <div className="flex items-center justify-end gap-2 border-t border-border-subtle px-5 py-3">
+          <button
+            onClick={onClose}
+            className="rounded-md border border-border-subtle bg-surface px-3 py-1.5 text-[13px] font-medium text-secondary transition-colors hover:bg-surface-hover"
+          >
+            {t("common.close")}
+          </button>
+          <button
+            onClick={() => void handleCopy()}
+            disabled={entries.length === 0}
+            className={cn(
+              "inline-flex items-center gap-1.5 rounded-md px-3 py-1.5 text-[13px] font-medium transition-all duration-150 disabled:cursor-not-allowed disabled:opacity-50",
+              copied
+                ? "bg-emerald-500 text-white"
+                : "bg-accent text-white hover:bg-accent-hover"
+            )}
+          >
+            {copied ? (
+              <Check className="h-3.5 w-3.5" />
+            ) : (
+              <Copy className="h-3.5 w-3.5" />
+            )}
+            {copied ? t("mySkills.copiedToClipboard") : t("mySkills.copyAll")}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function centralDirName(skill: ManagedSkill) {
   return skill.central_path.split(/[\\/]/).filter(Boolean).pop() || skill.name;
 }
@@ -153,9 +260,15 @@ export function MySkills() {
   const [togglingTarget, setTogglingTarget] = useState<{ skillId: string; tool: string } | null>(null);
   const [gitStatus, setGitStatus] = useState<GitBackupStatus | null>(null);
   const [gitRemoteConfig, setGitRemoteConfig] = useState("");
-  const [tagEditSkillId, setTagEditSkillId] = useState<string | null>(null);
-  const [tagInput, setTagInput] = useState("");
-  const tagInputRef = useRef<HTMLInputElement>(null);
+  // Tag picker popover (replaces the inline tag-input): the "+" button on a
+  // card opens a long floating panel to search/select/create tags for that
+  // single skill.
+  const [tagPickerSkillId, setTagPickerSkillId] = useState<string | null>(null);
+  const [tagPickerSearch, setTagPickerSearch] = useState("");
+  const tagPickerRef = useRef<HTMLDivElement>(null);
+  // Skills-list dialog: dumps every visible skill as "name: description" per
+  // line, copyable to paste into an AI context.
+  const [skillsListOpen, setSkillsListOpen] = useState(false);
 
   const [presetSkillOrder, setPresetSkillOrder] = useState<string[]>([]);
 
@@ -192,15 +305,40 @@ export function MySkills() {
     refreshAllTags();
   }, [skills]);
 
-  // Close the tag context menu on Escape (click-outside is handled by its backdrop).
+  // Close the tag context menu and tag picker on Escape. The tag picker also
+  // closes on click-outside (its own search input is not inside tagPickerRef).
   useEffect(() => {
-    if (!tagMenu) return;
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") setTagMenu(null);
+      if (e.key !== "Escape") return;
+      if (tagPickerSkillId) {
+        setTagPickerSkillId(null);
+        setTagPickerSearch("");
+      } else if (tagMenu) {
+        setTagMenu(null);
+      }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [tagMenu]);
+  }, [tagMenu, tagPickerSkillId]);
+
+  // Click outside the tag picker panel closes it.
+  useEffect(() => {
+    if (!tagPickerSkillId) return;
+    const onDown = (e: MouseEvent) => {
+      if (tagPickerRef.current && !tagPickerRef.current.contains(e.target as Node)) {
+        setTagPickerSkillId(null);
+        setTagPickerSearch("");
+      }
+    };
+    // Use mousedown so it fires before the click reaches the card beneath.
+    window.addEventListener("mousedown", onDown);
+    return () => window.removeEventListener("mousedown", onDown);
+  }, [tagPickerSkillId]);
+
+  // Reset search whenever a new card's picker opens.
+  useEffect(() => {
+    setTagPickerSearch("");
+  }, [tagPickerSkillId]);
 
   const toggleFilter = (set: Set<string>, value: string): Set<string> => {
     const next = new Set(set);
@@ -735,16 +873,15 @@ export function MySkills() {
   };
 
   const handleAddTag = async (skill: ManagedSkill, inputValue?: string) => {
-    const trimmed = (inputValue ?? tagInput).trim();
+    const trimmed = (inputValue ?? tagPickerSearch).trim();
     if (!trimmed || skill.tags.includes(trimmed)) {
-      setTagInput("");
+      setTagPickerSearch("");
       return;
     }
     try {
       await api.setSkillTags(skill.id, [...skill.tags, trimmed]);
       toast.success(t("mySkills.tags.tagAdded"));
-      setTagEditSkillId(null);
-      setTagInput("");
+      setTagPickerSearch("");
       await refreshManagedSkills();
     } catch (error: unknown) {
       toast.error(getErrorMessage(error, t("common.error")));
@@ -943,6 +1080,106 @@ export function MySkills() {
     return null;
   };
 
+  // Floating tag-picker panel: rendered for whichever skill is currently open
+  // (tagPickerSkillId). Shows that skill's bound tags (clickable to remove),
+  // a search box, the candidate tags (clickable to add), and a "create new"
+  // row. Reused by both grid and list card layouts.
+  const renderTagPicker = (skill: ManagedSkill) => {
+    if (tagPickerSkillId !== skill.id) return null;
+    const candidates = getTagOptions(skill, tagPickerSearch);
+    const trimmed = tagPickerSearch.trim();
+    // Show a "create" row only when the search term is a real new tag (not
+    // empty, not already bound, and not already matched as a candidate).
+    const canCreate =
+      trimmed.length > 0 &&
+      !skill.tags.includes(trimmed) &&
+      !candidates.some((c) => c.toLowerCase() === trimmed.toLowerCase());
+
+    return (
+      <div
+        ref={tagPickerRef}
+        onClick={(e) => e.stopPropagation()}
+        // Pop-in: small fade + lift from the anchor so the panel feels like it
+        // detached from the "+" button. Stays above z-30 from the sortable
+        // wrapper via z-50 plus a ring for clarity over busy cards.
+        className="picker-pop absolute bottom-full left-0 z-50 mb-1.5 w-[260px] max-w-[80vw] origin-bottom-left rounded-lg border border-border bg-surface p-2 shadow-2xl shadow-black/10 ring-1 ring-black/5"
+      >
+        {/* Bound tags (click to remove) */}
+        {skill.tags.length > 0 && (
+          <div className="mb-2 flex flex-wrap items-center gap-1 border-b border-border-subtle pb-2">
+            {skill.tags.map((tag) => (
+              <span
+                key={tag}
+                className={cn(
+                  "inline-flex items-center gap-0.5 rounded-full px-2 py-0.5 text-[11px] font-medium",
+                  getTagColor(tag, allTags)
+                )}
+              >
+                {tag}
+                <button
+                  onClick={(e) => { e.stopPropagation(); handleRemoveTag(skill, tag); }}
+                  className="inline-flex items-center justify-center rounded-full p-0.5 opacity-60 hover:opacity-100 hover:bg-red-500/10 hover:text-red-500"
+                  title={t("mySkills.batchTagDialog.clickToRemove")}
+                >
+                  <X className="h-2.5 w-2.5" />
+                </button>
+              </span>
+            ))}
+          </div>
+        )}
+        {/* Search */}
+        <div className="relative mb-1.5">
+          <Search className="absolute left-2 top-1/2 h-3 w-3 -translate-y-1/2 text-faint" />
+          <input
+            type="text"
+            value={tagPickerSearch}
+            onChange={(e) => setTagPickerSearch(e.target.value)}
+            placeholder={t("mySkills.tags.searchTags")}
+            className="h-7 w-full rounded-md border border-border-subtle bg-transparent pl-7 pr-2 text-[12px] text-secondary outline-none transition-colors focus:border-accent focus:bg-accent-bg/40"
+            autoCapitalize="none"
+            autoCorrect="off"
+            autoComplete="off"
+            spellCheck={false}
+            autoFocus
+          />
+        </div>
+        {/* Candidate / create list */}
+        <div className="max-h-[200px] space-y-0.5 overflow-y-auto">
+          {candidates.length === 0 && !canCreate ? (
+            <p className="px-1.5 py-2 text-center text-[11px] text-faint">
+              {t("mySkills.tags.noMoreTags")}
+            </p>
+          ) : (
+            <>
+              {candidates.map((tagOption) => (
+                <button
+                  key={tagOption}
+                  type="button"
+                  onClick={(e) => { e.stopPropagation(); handleAddTag(skill, tagOption); }}
+                  className="group flex w-full items-center justify-between rounded px-1.5 py-1 text-left text-[12px] text-secondary transition-colors hover:bg-surface-hover hover:text-primary"
+                  title={tagOption}
+                >
+                  <span className="truncate">{tagOption}</span>
+                  <Plus className="h-3 w-3 shrink-0 text-faint transition-colors group-hover:text-accent-light" />
+                </button>
+              ))}
+              {canCreate && (
+                <button
+                  type="button"
+                  onClick={(e) => { e.stopPropagation(); handleAddTag(skill, trimmed); }}
+                  className="flex w-full items-center gap-1 rounded px-1.5 py-1 text-left text-[12px] font-medium text-accent-light transition-colors hover:bg-accent-bg"
+                >
+                  <Plus className="h-3 w-3 shrink-0" />
+                  <span className="truncate">{t("mySkills.tags.createTag", { name: trimmed })}</span>
+                </button>
+              )}
+            </>
+          )}
+        </div>
+      </div>
+    );
+  };
+
   return (
     <div className="app-page">
       <div className="app-page-header pr-2 pb-1 flex items-center justify-between gap-3">
@@ -953,6 +1190,14 @@ export function MySkills() {
           </span>
         </h1>
 
+        <button
+          onClick={() => setSkillsListOpen(true)}
+          className="group inline-flex items-center gap-1.5 rounded-md border border-border-subtle bg-surface px-3 py-1.5 text-[13px] font-medium text-secondary transition-all duration-150 hover:-translate-y-px hover:border-accent/40 hover:bg-surface-hover hover:text-primary active:translate-y-0"
+          title={t("mySkills.skillsList")}
+        >
+          <AlignLeft className="h-3.5 w-3.5 transition-transform duration-150 group-hover:rotate-3" />
+          {t("mySkills.skillsList")}
+        </button>
       </div>
 
       <div className="app-toolbar">
@@ -1186,7 +1431,7 @@ export function MySkills() {
                   key={skill.id}
                   id={skill.id}
                   disabled={!canDrag}
-                  className={tagEditSkillId === skill.id ? "relative z-30" : undefined}
+                  className={tagPickerSkillId === skill.id ? "relative z-30 ring-2 ring-accent/30 ring-offset-2 ring-offset-bg rounded-xl" : undefined}
                 >
                 {(dragHandle) => (
                 <div
@@ -1290,7 +1535,7 @@ export function MySkills() {
                         )}
                       </div>
                     )}
-                    <div className="mt-2 flex flex-wrap items-center gap-1">
+                    <div className="relative mt-2 flex flex-wrap items-center gap-1">
                       {skill.tags.map((tag) => (
                         <span
                           key={tag}
@@ -1308,55 +1553,23 @@ export function MySkills() {
                           </button>
                         </span>
                       ))}
-                      {tagEditSkillId === skill.id ? (
-                        <div className="relative" onClick={(e) => e.stopPropagation()}>
-                          <input
-                            ref={tagInputRef}
-                            type="text"
-                            value={tagInput}
-                            onChange={(e) => setTagInput(e.target.value)}
-                            onKeyDown={(e) => {
-                              if (e.key === "Enter") { handleAddTag(skill); }
-                              if (e.key === "Escape") { setTagEditSkillId(null); setTagInput(""); }
-                            }}
-                            onBlur={() => {
-                              if (tagInput.trim()) handleAddTag(skill);
-                              else { setTagEditSkillId(null); setTagInput(""); }
-                            }}
-                            placeholder={t("mySkills.tags.addTag")}
-                            className="h-5 w-28 rounded-full border border-border-subtle bg-transparent px-1.5 text-[11px] text-secondary outline-none focus:border-accent"
-                            autoCapitalize="none"
-                            autoCorrect="off"
-                            autoComplete="off"
-                            spellCheck={false}
-                            autoFocus
-                          />
-                          {getTagOptions(skill, tagInput).length > 0 && (
-                            <div className="absolute left-0 top-6 z-50 max-h-56 min-w-[112px] max-w-[180px] overflow-y-auto rounded-md border border-border-subtle bg-surface p-1 shadow-lg">
-                              {getTagOptions(skill, tagInput).map((tagOption) => (
-                                <button
-                                  key={tagOption}
-                                  type="button"
-                                  onMouseDown={(e) => e.preventDefault()}
-                                  onClick={(e) => { e.stopPropagation(); handleAddTag(skill, tagOption); }}
-                                  className="w-full truncate rounded px-1.5 py-1 text-left text-[11px] text-secondary hover:bg-surface-hover"
-                                  title={tagOption}
-                                >
-                                  {tagOption}
-                                </button>
-                              ))}
-                            </div>
-                          )}
-                        </div>
-                      ) : (
-                        <button
-                          onClick={(e) => { e.stopPropagation(); setTagEditSkillId(skill.id); setTagInput(""); }}
-                          className="inline-flex items-center rounded-full p-0.5 text-faint transition-colors hover:text-muted opacity-0 group-hover:opacity-100"
-                          title={t("mySkills.tags.addTag")}
-                        >
-                          <Plus className="h-3 w-3" />
-                        </button>
-                      )}
+                      <button
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setTagPickerSkillId((prev) => (prev === skill.id ? null : skill.id));
+                        }}
+                        className={cn(
+                          "inline-flex items-center rounded-full p-0.5 transition-all duration-150",
+                          tagPickerSkillId === skill.id
+                            ? "bg-accent/15 text-accent-light"
+                            : "border border-dashed border-border-subtle text-faint hover:border-accent hover:text-accent-light"
+                        )}
+                        title={t("mySkills.tags.addTag")}
+                        aria-label={t("mySkills.tags.addTag")}
+                      >
+                        <Plus className="h-3 w-3" />
+                      </button>
+                      {renderTagPicker(skill)}
                     </div>
                   </div>
 
@@ -1443,7 +1656,7 @@ export function MySkills() {
                   {skill.description || "—"}
                 </p>
 
-                <div className="flex shrink-0 items-center gap-1.5">
+                <div className="relative flex shrink-0 items-center gap-1.5">
                   {skill.tags.map((tag) => (
                     <span
                       key={tag}
@@ -1455,6 +1668,23 @@ export function MySkills() {
                       {tag}
                     </span>
                   ))}
+                  <button
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setTagPickerSkillId((prev) => (prev === skill.id ? null : skill.id));
+                    }}
+                    className={cn(
+                      "inline-flex items-center rounded-full p-0.5 transition-all duration-150",
+                      tagPickerSkillId === skill.id
+                        ? "bg-accent/15 text-accent-light"
+                        : "border border-dashed border-border-subtle text-faint hover:border-accent hover:text-accent-light"
+                    )}
+                    title={t("mySkills.tags.addTag")}
+                    aria-label={t("mySkills.tags.addTag")}
+                  >
+                    <Plus className="h-3 w-3" />
+                  </button>
+                  {renderTagPicker(skill)}
                 </div>
 
                 <div className="flex shrink-0 items-center gap-2.5">
@@ -1641,6 +1871,14 @@ export function MySkills() {
         allTags={allTags}
         onClose={() => setBatchTagDialogOpen(false)}
         onApply={handleBatchEditTags}
+      />
+      <SkillsListDialog
+        open={skillsListOpen}
+        entries={filtered.map((skill) => ({
+          name: skillDisplayNames.get(skill.id) || skill.name,
+          description: skill.description,
+        }))}
+        onClose={() => setSkillsListOpen(false)}
       />
     </div>
   );

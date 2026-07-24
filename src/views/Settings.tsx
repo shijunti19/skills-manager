@@ -1083,56 +1083,27 @@ export function Settings() {
             </div>
           ))}
 
-        {/* Skill prompt spec — controls how skills are referenced in generated prompts */}
-        {agent.installed &&
-          (editingPromptSpecKey === agent.key ? (
-            <div className="flex items-start gap-1">
-              <textarea
-                value={editingPromptSpecValue}
-                onChange={(e) => setEditingPromptSpecValue(e.target.value)}
-                placeholder={t("promptPreview.promptSpecPlaceholder")}
-                rows={2}
-                autoFocus
-                className="min-w-0 flex-1 rounded border border-border-subtle bg-background px-1.5 py-1 text-[12px] font-mono text-secondary outline-none focus:border-accent"
-                onKeyDown={(e) => {
-                  if (e.key === "Escape") setEditingPromptSpecKey(null);
-                }}
-              />
-              <button
-                onClick={handleSavePromptSpec}
-                className="mt-0.5 shrink-0 p-1 text-emerald-500 hover:text-emerald-400 outline-none"
-              >
-                <Check className="h-3 w-3" />
-              </button>
-              <button
-                onClick={() => setEditingPromptSpecKey(null)}
-                className="mt-0.5 shrink-0 p-1 text-muted hover:text-secondary outline-none"
-              >
-                <X className="h-3 w-3" />
-              </button>
-            </div>
-          ) : (
-            <div className="flex items-center gap-1">
-              <p
-                className="min-w-0 flex-1 truncate text-[12px] font-mono leading-tight text-muted"
-                title={agent.skills_prompt_spec ?? t("promptPreview.promptSpecDesc")}
-              >
-                {agent.skills_prompt_spec
-                  ? t("promptPreview.promptSpecTitle") + ": " + agent.skills_prompt_spec
-                  : t("promptPreview.promptSpecDesc")}
-              </p>
-              <button
-                type="button"
-                onClick={() =>
-                  startEditPromptSpec(agent.key, agent.skills_prompt_spec)
-                }
-                className="shrink-0 p-0.5 text-muted hover:text-accent outline-none opacity-0 transition-opacity group-hover:opacity-100"
-                title={t("promptPreview.promptSpecTitle")}
-              >
-                <Pencil className="h-3 w-3" />
-              </button>
-            </div>
-          ))}
+        {/* Skill prompt spec — click pencil to edit in a dialog (textarea + help) */}
+        {agent.installed && (
+          <div className="flex items-center gap-1">
+            <p
+              className="min-w-0 flex-1 truncate text-[12px] font-mono leading-tight text-muted"
+              title={agent.skills_prompt_spec ?? t("promptPreview.promptSpecDesc")}
+            >
+              {agent.skills_prompt_spec
+                ? t("promptPreview.promptSpecTitle") + ": " + agent.skills_prompt_spec
+                : t("promptPreview.promptSpecDesc")}
+            </p>
+            <button
+              type="button"
+              onClick={() => startEditPromptSpec(agent.key, agent.skills_prompt_spec)}
+              className="shrink-0 p-0.5 text-muted hover:text-accent outline-none opacity-0 transition-opacity group-hover:opacity-100"
+              title={t("promptPreview.promptSpecTitle")}
+            >
+              <Pencil className="h-3 w-3" />
+            </button>
+          </div>
+        )}
       </div>
     </div>
   );
@@ -1996,6 +1967,107 @@ export function Settings() {
           </div>
         </section>
       </div>
+
+      {/* Skill prompt spec editor + help dialog */}
+      {editingPromptSpecKey !== null && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4"
+          onClick={() => setEditingPromptSpecKey(null)}
+        >
+          <div
+            className="flex max-h-[88vh] w-full max-w-lg flex-col rounded-lg border border-border bg-bg-secondary shadow-xl"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between border-b border-border-subtle px-5 py-3">
+              <h2 className="text-[15px] font-semibold text-primary">
+                {t("promptPreview.promptSpecTitle")}
+              </h2>
+              <button
+                onClick={() => setEditingPromptSpecKey(null)}
+                className="rounded p-1 text-faint transition hover:text-secondary"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+
+            <div className="flex-1 space-y-4 overflow-y-auto px-5 py-4">
+              {/* Editor on top */}
+              <div>
+                <label className="app-section-title mb-1.5 block">
+                  {t("promptPreview.promptSpecEditorLabel")}
+                </label>
+                <textarea
+                  value={editingPromptSpecValue}
+                  onChange={(e) => setEditingPromptSpecValue(e.target.value)}
+                  placeholder={t("promptPreview.promptSpecPlaceholder")}
+                  rows={3}
+                  autoFocus
+                  className="w-full resize-y rounded-md border border-border-subtle bg-surface px-3 py-2 font-mono text-[12px] leading-relaxed text-primary outline-none focus:border-accent"
+                  onKeyDown={(e) => {
+                    if (e.key === "Escape") setEditingPromptSpecKey(null);
+                  }}
+                />
+              </div>
+
+              {/* Help below the editor */}
+              <div className="space-y-2.5 rounded-md border border-border-subtle bg-surface-hover/40 px-3 py-3 text-[12px] leading-relaxed text-secondary">
+                <p>{t("promptPreview.promptSpecHelpIntro")}</p>
+                <div>
+                  <p className="mb-1 font-medium text-primary">
+                    {t("promptPreview.promptSpecHelpPlaceholderTitle")}
+                  </p>
+                  <ul className="ml-4 list-disc space-y-0.5 text-[12px] text-muted">
+                    <li>
+                      <code className="rounded bg-surface-hover px-1">$(name)</code>
+                      {" / "}
+                      <code className="rounded bg-surface-hover px-1">{"{{name}}"}</code>
+                      {" — "}
+                      {t("promptPreview.promptSpecHelpName")}
+                    </li>
+                    <li>
+                      <code className="rounded bg-surface-hover px-1">$(path)</code>
+                      {" / "}
+                      <code className="rounded bg-surface-hover px-1">{"{{path}}"}</code>
+                      {" — "}
+                      {t("promptPreview.promptSpecHelpPath")}
+                    </li>
+                  </ul>
+                </div>
+                <div>
+                  <p className="mb-1 font-medium text-primary">
+                    {t("promptPreview.promptSpecHelpExampleTitle")}
+                  </p>
+                  <pre className="overflow-x-auto rounded bg-surface-hover px-3 py-2 font-mono text-[12px] text-tertiary">
+{`[$(name)]((path))
+
+# 示例输出：
+# [$caveman](C:/Users/.../skills/caveman/SKILL.md)`}
+                  </pre>
+                </div>
+                <p className="text-[11px] text-faint">
+                  {t("promptPreview.promptSpecHelpDefault")}
+                </p>
+              </div>
+            </div>
+
+            <div className="flex items-center justify-end gap-2 border-t border-border-subtle px-5 py-3">
+              <button
+                onClick={() => setEditingPromptSpecKey(null)}
+                className="rounded-md border border-border-subtle bg-surface px-3 py-1.5 text-[13px] font-medium text-secondary transition hover:bg-surface-hover"
+              >
+                {t("common.cancel")}
+              </button>
+              <button
+                onClick={() => void handleSavePromptSpec()}
+                className="inline-flex items-center gap-1.5 rounded-md bg-accent px-3 py-1.5 text-[13px] font-medium text-white transition hover:bg-accent-hover"
+              >
+                <Check className="h-3.5 w-3.5" />
+                {t("common.save")}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

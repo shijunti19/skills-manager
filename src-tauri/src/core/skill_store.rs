@@ -1,5 +1,5 @@
 use anyhow::Result;
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, Transaction};
 use serde::Serialize;
 use std::path::PathBuf;
 use std::sync::Mutex;
@@ -189,6 +189,79 @@ impl SkillStore {
     pub fn upsert_skill(&self, skill: &SkillRecord) -> Result<()> {
         let conn = self.conn.lock().unwrap();
         conn.execute(
+            "INSERT INTO skills (
+                id, name, description, source_type, source_ref, source_ref_resolved, source_subpath,
+                source_branch, source_revision, remote_revision, central_path, content_hash, enabled,
+                created_at, updated_at, status, update_status, last_checked_at, last_check_error
+             )
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)
+             ON CONFLICT(id) DO UPDATE SET
+                name = excluded.name,
+                description = excluded.description,
+                source_type = excluded.source_type,
+                source_ref = excluded.source_ref,
+                source_ref_resolved = excluded.source_ref_resolved,
+                source_subpath = excluded.source_subpath,
+                source_branch = excluded.source_branch,
+                source_revision = excluded.source_revision,
+                remote_revision = excluded.remote_revision,
+                central_path = excluded.central_path,
+                content_hash = excluded.content_hash,
+                enabled = excluded.enabled,
+                updated_at = excluded.updated_at,
+                status = excluded.status,
+                update_status = excluded.update_status,
+                last_checked_at = excluded.last_checked_at,
+                last_check_error = excluded.last_check_error",
+            params![
+                skill.id,
+                skill.name,
+                skill.description,
+                skill.source_type,
+                skill.source_ref,
+                skill.source_ref_resolved,
+                skill.source_subpath,
+                skill.source_branch,
+                skill.source_revision,
+                skill.remote_revision,
+                skill.central_path,
+                skill.content_hash,
+                skill.enabled,
+                skill.created_at,
+                skill.updated_at,
+                skill.status,
+                skill.update_status,
+                skill.last_checked_at,
+                skill.last_check_error,
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Run `f` inside a single transaction. Locks the connection for the whole
+    /// duration, so `f` MUST NOT call any other `&self` method on this store
+    /// (those re-lock `self.conn` and would deadlock) — it should use the
+    /// `&_tx` static helpers (`upsert_skill_tx`, `set_tags_for_skill_tx`, …)
+    /// that take the `&Transaction` directly. Used by the reindex loop to batch
+    /// hundreds of writes into one commit.
+    pub fn with_transaction<T, F>(&self, f: F) -> Result<T>
+    where
+        F: FnOnce(&Transaction<'_>) -> Result<T>,
+    {
+        let conn = self.conn.lock().unwrap();
+        let tx = conn.unchecked_transaction()?;
+        let result = f(&tx)?;
+        tx.commit()?;
+        Ok(result)
+    }
+
+    /// Transaction-scoped variant of [`upsert_skill`], used in the reindex loop
+    /// (see `sync_metadata::reindex_from_metadata_unlocked`). Batching all
+    /// reindex writes into one transaction eliminates ~2 fsync per skill (was
+    /// 364 autocommit commits for 182 skills) and is the main lever for cutting
+    /// reindex DB time from seconds to sub-second.
+    pub fn upsert_skill_tx(tx: &Transaction<'_>, skill: &SkillRecord) -> Result<()> {
+        tx.execute(
             "INSERT INTO skills (
                 id, name, description, source_type, source_ref, source_ref_resolved, source_subpath,
                 source_branch, source_revision, remote_revision, central_path, content_hash, enabled,
@@ -463,6 +536,18 @@ impl SkillStore {
             params![id],
         )?;
         conn.execute("DELETE FROM skills WHERE id = ?1", params![id])?;
+        Ok(())
+    }
+
+    /// Transaction-scoped variant of [`delete_skill`], used in the reindex loop
+    /// so removals of disappeared skills ride the same transaction as the
+    /// upserts instead of each firing their own autocommit.
+    pub fn delete_skill_tx(tx: &Transaction<'_>, id: &str) -> Result<()> {
+        tx.execute(
+            "DELETE FROM skill_smart_tag_relations WHERE skill_id = ?1",
+            params![id],
+        )?;
+        tx.execute("DELETE FROM skills WHERE id = ?1", params![id])?;
         Ok(())
     }
 
@@ -1266,6 +1351,25 @@ impl SkillStore {
             let trimmed = tag.trim();
             if !trimmed.is_empty() {
                 conn.execute(
+                    "INSERT OR IGNORE INTO skill_tags (skill_id, tag) VALUES (?1, ?2)",
+                    params![skill_id, trimmed],
+                )?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Transaction-scoped variant of [`set_tags_for_skill`], used in the
+    /// reindex loop so per-skill tag writes don't each autocommit.
+    pub fn set_tags_for_skill_tx(tx: &Transaction<'_>, skill_id: &str, tags: &[String]) -> Result<()> {
+        tx.execute(
+            "DELETE FROM skill_tags WHERE skill_id = ?1",
+            params![skill_id],
+        )?;
+        for tag in tags {
+            let trimmed = tag.trim();
+            if !trimmed.is_empty() {
+                tx.execute(
                     "INSERT OR IGNORE INTO skill_tags (skill_id, tag) VALUES (?1, ?2)",
                     params![skill_id, trimmed],
                 )?;

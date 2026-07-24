@@ -428,6 +428,7 @@ mod tests {
             skills_dir: target_base.to_string_lossy().to_string(),
             project_relative_skills_dir: None,
             category: Default::default(),
+            skills_prompt_spec: None,
         }];
         store
             .set_setting(

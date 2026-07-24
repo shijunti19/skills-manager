@@ -4,6 +4,7 @@ import {
   ChevronRight,
   Download,
   FileText,
+  FolderOpen,
   Globe,
   LayoutGrid,
   List,
@@ -15,6 +16,7 @@ import {
   Trash2,
   Upload,
 } from "lucide-react";
+import { openPath } from "@tauri-apps/plugin-opener";
 import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
 import { cn } from "../utils";
@@ -239,7 +241,13 @@ export function WorkspaceView({ config }: { config: WorkspaceConfig }) {
   // ── Smart Tag filter state ──
   const [smartTags, setSmartTags] = useState<api.SmartTag[]>([]);
   const [smartTagsMap, setSmartTagsMap] = useState<Record<string, string[]>>({});
-  const [selectedSmartTagId, setSelectedSmartTagId] = useState<string | null>(null);
+  const [selectedSmartTagIds, setSelectedSmartTagIds] = useState<string[]>([]);
+
+  const toggleSmartTagId = useCallback((id: string) => {
+    setSelectedSmartTagIds((prev) =>
+      prev.includes(id) ? prev.filter((tid) => tid !== id) : [...prev, id]
+    );
+  }, []);
 
   // Cross-category redirect: a deep link like /global-workspace/openclaw should
   // land on /lobster-workspace/openclaw. Compute it before any filtering so a
@@ -398,6 +406,7 @@ export function WorkspaceView({ config }: { config: WorkspaceConfig }) {
     setPullConfirmSkill(null);
     setDeleteLocalConfirmSkill(null);
     setTagFilters(new Set());
+    setSelectedSmartTagIds([]);
   }, [currentTool?.key]);
 
   const agentSkills = useMemo(
@@ -454,18 +463,19 @@ export function WorkspaceView({ config }: { config: WorkspaceConfig }) {
       });
   }, [localSkills, search, tagFilters]);
 
-  // Managed skills belonging to the selected smart tag (null when no tag is
-  // selected, meaning the normal local-skills list is shown).
+  // Union of managed skills across all selected smart tags (null when no tag
+  // is selected, meaning the normal local-skills list is shown).
   const tagFilteredSkills = useMemo<ManagedSkill[] | null>(() => {
-    if (!selectedSmartTagId) return null;
-    const skillIdsForTag = new Set<string>();
+    if (selectedSmartTagIds.length === 0) return null;
+    const selected = new Set(selectedSmartTagIds);
+    const skillIds = new Set<string>();
     for (const [skillId, tagIds] of Object.entries(smartTagsMap)) {
-      if (tagIds.includes(selectedSmartTagId)) skillIdsForTag.add(skillId);
+      if (tagIds.some((tagId) => selected.has(tagId))) skillIds.add(skillId);
     }
     return managedSkills
-      .filter((s) => skillIdsForTag.has(s.id))
+      .filter((s) => skillIds.has(s.id))
       .sort((a, b) => a.name.localeCompare(b.name));
-  }, [selectedSmartTagId, smartTagsMap, managedSkills]);
+  }, [selectedSmartTagIds, smartTagsMap, managedSkills]);
 
   const inSyncLocalCount = useMemo(
     () => localSkills.filter((skill) => skill.sync_status === "in_sync").length,
@@ -506,6 +516,20 @@ export function WorkspaceView({ config }: { config: WorkspaceConfig }) {
   const handleSheetInstalled = useCallback(async () => {
     await Promise.all([refreshManagedSkills(), refreshTools(), loadLocalSkills()]);
   }, [loadLocalSkills, refreshManagedSkills, refreshTools]);
+
+  // Open the agent's skills directory in the OS file manager. Uses
+  // tauri-plugin-opener's openPath which routes to explorer.exe on Windows,
+  // `open` on macOS, and xdg-open on Linux.
+  const handleOpenInExplorer = useCallback(
+    async (path: string) => {
+      try {
+        await openPath(path);
+      } catch (e) {
+        toast.error(getErrorMessage(e, t("globalWorkspace.openInExplorerFailed")));
+      }
+    },
+    [t],
+  );
 
   const handleUploadLocalSkill = useCallback(
     async (skill: ProjectSkill) => {
@@ -807,7 +831,15 @@ export function WorkspaceView({ config }: { config: WorkspaceConfig }) {
               <span className="app-badge">{localSkills.length}</span>
             </h1>
             <p className="mt-1 truncate text-[13px] text-muted" title={currentTool.skills_dir}>
-              {compactHomePath(currentTool.skills_dir)}
+              <button
+                type="button"
+                onClick={() => void handleOpenInExplorer(currentTool.skills_dir)}
+                className="group/path inline-flex max-w-full items-center gap-1 rounded px-1 py-0.5 text-[13px] text-muted transition-colors hover:bg-surface-hover hover:text-primary focus:outline-none focus:ring-2 focus:ring-accent/40"
+                title={`${t("globalWorkspace.openInExplorer")} · ${currentTool.skills_dir}`}
+              >
+                <span className="truncate">{compactHomePath(currentTool.skills_dir)}</span>
+                <FolderOpen className="h-3 w-3 shrink-0 text-faint transition-colors group-hover/path:text-accent-light" />
+              </button>
               <span className="px-1.5">·</span>
               {t("globalWorkspace.localSkills.summary", {
                 total: localSkills.length,
@@ -879,8 +911,9 @@ export function WorkspaceView({ config }: { config: WorkspaceConfig }) {
             managedSkills={managedSkills}
             agent={currentTool}
             onRefresh={handleSheetInstalled}
-            selectedTagId={selectedSmartTagId}
-            onSelectTag={setSelectedSmartTagId}
+            selectedTagIds={selectedSmartTagIds}
+            onToggleTag={toggleSmartTagId}
+            onClearTags={() => setSelectedSmartTagIds([])}
           />
         )}
 
@@ -973,7 +1006,7 @@ export function WorkspaceView({ config }: { config: WorkspaceConfig }) {
             </span>
             <button
               type="button"
-              onClick={() => setSelectedSmartTagId(null)}
+              onClick={() => setSelectedSmartTagIds([])}
               className="text-[12px] font-medium text-accent hover:underline"
             >
               {t("promptPreview.clearFilter")}

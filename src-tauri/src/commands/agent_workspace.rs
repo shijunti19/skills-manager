@@ -9,8 +9,8 @@ use crate::commands::projects::{
 };
 use crate::core::skill_store::{SkillRecord, SkillStore, SkillTargetRecord};
 use crate::core::{
-    content_hash, error::AppError, installer, project_scanner, scenario_service, sync_engine,
-    tool_adapters, tool_service,
+    content_hash, error::AppError, installer, project_scanner, scenario_service, skill_metadata,
+    sync_engine, tool_adapters, tool_service,
 };
 
 fn target_path_equals_skill(target_path: &str, skill_path: &str) -> bool {
@@ -578,6 +578,103 @@ pub async fn update_global_local_skill_from_center(
     let store = store.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
         update_agent_local_skill_from_center(&store, &agent, &skill_relative_path)
+    })
+    .await?
+}
+
+/// Result of [`strip_agent_skill_descriptions`].
+#[derive(serde::Serialize)]
+pub struct StripDescriptionsDto {
+    /// Number of skills whose `description` field was actually removed.
+    pub stripped: usize,
+    /// Number of skills that had no `description` to remove.
+    pub skipped: usize,
+    /// Total number of skill directories scanned.
+    pub total: usize,
+}
+
+/// Clear the `description` field from every skill's SKILL.md under an agent's
+/// global skills directory — so the agent's AI context no longer loads those
+/// (often long) descriptions.
+///
+/// Guarded by two hard preconditions; violating either aborts with a friendly
+/// error before touching any file:
+/// 1. The global `sync_mode` must be `copy`. Under symlink/junction mode the
+///    agent directory entries would be links into the central library, and
+///    editing them would corrupt the shared source.
+/// 2. No skill directory under the agent's skills folder may itself be a
+///    symlink/junction — for the same reason.
+#[tauri::command]
+pub async fn strip_agent_skill_descriptions(
+    store: State<'_, Arc<SkillStore>>,
+    agent: String,
+) -> Result<StripDescriptionsDto, AppError> {
+    let store = store.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || -> Result<StripDescriptionsDto, AppError> {
+        // Resolve + validate the adapter (mirrors organize_agent_skills).
+        let adapter = adapter_for_agent(&store, &agent)?;
+        if !adapter.is_installed() {
+            return Err(AppError::not_found(format!(
+                "{} is not installed",
+                adapter.display_name
+            )));
+        }
+        if tool_service::get_disabled_tools(&store).contains(&agent) {
+            return Err(AppError::invalid_input(format!(
+                "{} is disabled",
+                adapter.display_name
+            )));
+        }
+
+        // Precondition 1: sync_mode must be "copy".
+        let configured_mode = store.get_setting("sync_mode").map_err(AppError::db)?;
+        let mode = sync_engine::sync_mode_for_tool(&agent, configured_mode.as_deref());
+        if !matches!(mode, sync_engine::SyncMode::Copy) {
+            return Err(AppError::invalid_input(
+                "默认同步模式必须是「文件复制」才能清空描述。请先到设置页切换为文件复制，并重新同步。",
+            ));
+        }
+
+        let skills = read_agent_local_skills(&adapter);
+        let total = skills.len();
+
+        // Precondition 2: no skill dir may be a symlink/junction.
+        let symlink_names: Vec<String> = skills
+            .iter()
+            .filter(|s| {
+                std::fs::symlink_metadata(&s.path)
+                    .map(|m| m.file_type().is_symlink())
+                    .unwrap_or(false)
+            })
+            .map(|s| s.relative_path.clone())
+            .collect();
+        if !symlink_names.is_empty() {
+            return Err(AppError::invalid_input(format!(
+                "以下技能是软连接，请先切换到文件复制模式并重新同步：{}",
+                symlink_names.join(", ")
+            )));
+        }
+
+        // Execute: strip description from each skill's SKILL.md.
+        let mut stripped = 0usize;
+        let mut skipped = 0usize;
+        for skill in &skills {
+            match skill_metadata::strip_description_from_skill_dir(std::path::Path::new(&skill.path)) {
+                Ok(skill_metadata::StripOutcome::Stripped) => stripped += 1,
+                Ok(skill_metadata::StripOutcome::NoDescription)
+                | Ok(skill_metadata::StripOutcome::NotASkill) => skipped += 1,
+                Err(e) => log::warn!(
+                    "strip_agent_skill_descriptions: failed to process {}: {e}",
+                    skill.path
+                ),
+            }
+        }
+
+        Ok(StripDescriptionsDto {
+            stripped,
+            skipped,
+            total,
+        })
     })
     .await?
 }

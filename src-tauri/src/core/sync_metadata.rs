@@ -1,4 +1,5 @@
 use anyhow::{Context, Result, anyhow, bail};
+use rusqlite::params;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fs;
@@ -8,12 +9,91 @@ use unicode_normalization::UnicodeNormalization;
 use walkdir::WalkDir;
 
 use super::central_repo;
+use super::content_hash;
 use super::repo_lock::RepoLock;
 use super::skill_metadata;
 use super::skill_store::{ScenarioRecord, SkillRecord, SkillStore};
 
 const SCHEMA_VERSION: u32 = 1;
 const APP_MIN_VERSION: &str = "2.0.0";
+
+/// Filename (under [`metadata_dir`]) recording when reindex last completed and
+/// the max content-mtime it observed. Lets a warm restart short-circuit the
+/// full per-skill hash walk when nothing on disk has changed since — turning a
+/// multi-second reindex into a single directory walk.
+const LAST_REINDEX_FILE: &str = "last_reindex.json";
+
+/// Bookkeeping record persisted after each successful reindex. Used to decide
+/// whether the next reindex can be skipped entirely.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct LastReindexRecord {
+    /// Schema of this bookkeeping file, for forward-compatible migrations.
+    schema_version: u32,
+    /// Max `modified_ms` over all skill content files at the last successful
+    /// reindex. If the current max equals this, no content changed → skip.
+    skills_max_mtime_ms: i64,
+    /// Number of skill directories seen at the last reindex. A change in count
+    /// (skill added/removed) also forces a re-run even if mtimes tie.
+    skill_dir_count: usize,
+}
+
+/// Path of the last-reindex bookkeeping file.
+fn last_reindex_path() -> PathBuf {
+    metadata_dir().join(LAST_REINDEX_FILE)
+}
+
+/// Load the persisted last-reindex record, if any. Missing/corrupt → None
+/// (forces a full reindex, which is always safe).
+fn load_last_reindex() -> Option<LastReindexRecord> {
+    let raw = fs::read_to_string(last_reindex_path()).ok()?;
+    serde_json::from_str(&raw).ok()
+}
+
+/// Persist the last-reindex record after a successful reindex. Best-effort:
+/// a write failure just means the next launch does a full reindex.
+fn save_last_reindex(skills_max_mtime_ms: i64, skill_dir_count: usize) {
+    let record = LastReindexRecord {
+        schema_version: 1,
+        skills_max_mtime_ms,
+        skill_dir_count,
+    };
+    let _ = atomic_write_json(&last_reindex_path(), &record);
+}
+
+/// Scan the skills root once and return (max content mtime, skill dir count).
+/// A single walk is far cheaper than hashing every skill (the hash reads every
+/// file's bytes; this only stats them). Returns (0, 0) if the dir is missing.
+fn scan_skills_root_fingerprint() -> (i64, usize) {
+    let root = central_repo::skills_dir();
+    let mut max_mtime: i64 = 0;
+    let mut dir_count = 0usize;
+    // Walk each immediate subdirectory of skills/ (one per skill) and take the
+    // max content-mtime across its files. A single stat-only walk per skill is
+    // far cheaper than hashing (which reads every file's bytes). We skip hidden
+    // dirs (`.skills-manager`, `.git`) so they don't pollute the count/mtime.
+    let entries = match fs::read_dir(&root) {
+        Ok(e) => e,
+        Err(_) => return (0, 0),
+    };
+    for entry in entries.flatten() {
+        let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
+        if !is_dir {
+            continue;
+        }
+        let name = entry.file_name();
+        if name.to_string_lossy().starts_with('.') {
+            continue;
+        }
+        dir_count += 1;
+        let entries = content_hash::list_content_files(&entry.path());
+        if let Some(ms) = content_hash::latest_modified_ms(&entries) {
+            if ms > max_mtime {
+                max_mtime = ms;
+            }
+        }
+    }
+    (max_mtime, dir_count)
+}
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct SchemaFile {
@@ -128,6 +208,30 @@ pub(crate) fn reindex_from_metadata_unlocked(store: &SkillStore) -> Result<()> {
     }
     ensure_unique_path_keys(&skills)?;
 
+    // mtime short-circuit: if nothing on disk changed since the last successful
+    // reindex (same max content-mtime AND same skill-dir count), skip the whole
+    // reindex. This turns a multi-second warm-start reindex into a single
+    // directory walk. The fingerprint is taken over the live skills dir, not
+    // the metadata files, so external edits (another device syncing in) still
+    // trigger a re-run. Falls back to a full reindex on any mismatch or missing
+    // record — always safe.
+    let (current_max_mtime, current_dir_count) = scan_skills_root_fingerprint();
+    let skip = match load_last_reindex() {
+        Some(prev) => {
+            prev.skills_max_mtime_ms == current_max_mtime
+                && prev.skill_dir_count == current_dir_count
+        }
+        None => false,
+    };
+    if skip {
+        log::debug!(
+            "reindex skipped: skills root unchanged (max_mtime={}, dir_count={})",
+            current_max_mtime,
+            current_dir_count
+        );
+        return Ok(());
+    }
+
     let has_complete_scenario_snapshot = metadata_has_complete_scenario_snapshot();
     let scenarios = if has_complete_scenario_snapshot {
         read_scenario_files()?
@@ -143,27 +247,39 @@ pub(crate) fn reindex_from_metadata_unlocked(store: &SkillStore) -> Result<()> {
     let skills_root = central_repo::skills_dir();
 
     let metadata_ids: HashSet<String> = skills.iter().map(|m| m.skill_id.clone()).collect();
-    for existing in store.get_all_skills()? {
-        if !metadata_ids.contains(&existing.id) {
-            store.delete_skill(&existing.id)?;
-        }
-    }
-
-    let existing_by_id: HashMap<String, SkillRecord> = store
-        .get_all_skills()?
-        .into_iter()
-        .map(|skill| (skill.id.clone(), skill))
+    let existing_skills = store.get_all_skills()?;
+    let existing_by_id: HashMap<String, SkillRecord> = existing_skills
+        .iter()
+        .map(|skill| (skill.id.clone(), skill.clone()))
         .collect();
 
-    // Every surviving row gets its central_path rewritten below; park them
-    // on placeholders first so path reassignments between skills (renames or
-    // merge collision reshuffles) cannot trip the UNIQUE constraint mid-loop.
-    store.park_central_paths_for_reindex()?;
+    // Pre-compute the per-skill work outside the transaction: hashing each
+    // skill dir is the expensive part (disk I/O), and reading it before the
+    // transaction keeps the lock window short. Only the actual DB writes go
+    // through `with_transaction` below, which batches all upserts/tag-writes/
+    // deletes into a single commit (was ~2 fsync per skill → 1 total).
+    struct PlannedWrite {
+        skill_id: String,
+        record: SkillRecord,
+        tags: Vec<String>,
+    }
+    struct PlannedDelete {
+        skill_id: String,
+    }
+    let mut planned_writes: Vec<PlannedWrite> = Vec::with_capacity(skills.len());
+    let mut planned_deletes: Vec<PlannedDelete> = Vec::new();
+
+    // Skills in the DB but not in metadata → delete.
+    for existing in &existing_skills {
+        if !metadata_ids.contains(&existing.id) {
+            planned_deletes.push(PlannedDelete { skill_id: existing.id.clone() });
+        }
+    }
 
     for meta in skills {
         let skill_dir = skills_root.join(&meta.path);
         if !skill_dir.is_dir() {
-            store.delete_skill(&meta.skill_id)?;
+            planned_deletes.push(PlannedDelete { skill_id: meta.skill_id.clone() });
             continue;
         }
 
@@ -213,14 +329,47 @@ pub(crate) fn reindex_from_metadata_unlocked(store: &SkillStore) -> Result<()> {
             last_checked_at: previous.and_then(|s| s.last_checked_at),
             last_check_error: previous.and_then(|s| s.last_check_error.clone()),
         };
-        store.upsert_skill(&record)?;
-        store.set_tags_for_skill(&meta.skill_id, &meta.tags)?;
+        planned_writes.push(PlannedWrite {
+            skill_id: meta.skill_id.clone(),
+            record,
+            tags: meta.tags.clone(),
+        });
     }
+
+    // Apply all DB writes in one transaction. `with_transaction` holds the
+    // connection lock for the closure's duration, so we MUST use the `&_tx`
+    // helpers (not the `&self` re-locking ones) inside.
+    store.with_transaction(|tx| {
+        // Park central_paths first so path reassignments between skills
+        // (renames or merge reshuffles) can't trip the UNIQUE constraint
+        // mid-loop. Inline SQL rather than calling park_central_paths_for_reindex
+        // (which would re-lock conn and deadlock).
+        tx.execute(
+            "UPDATE skills SET central_path = 'sm-reindex-parked://' || id",
+            [],
+        )?;
+        for d in &planned_deletes {
+            tx.execute(
+                "DELETE FROM skill_smart_tag_relations WHERE skill_id = ?1",
+                params![d.skill_id],
+            )?;
+            tx.execute("DELETE FROM skills WHERE id = ?1", params![d.skill_id])?;
+        }
+        for w in &planned_writes {
+            SkillStore::upsert_skill_tx(tx, &w.record)?;
+            SkillStore::set_tags_for_skill_tx(tx, &w.skill_id, &w.tags)?;
+        }
+        Ok(())
+    })?;
 
     if has_complete_scenario_snapshot {
         store.replace_scenarios_from_metadata(&scenarios)?;
         store.replace_scenario_memberships_from_metadata(&memberships)?;
     }
+    // Persist the fingerprint we just reconciled against, so the next launch
+    // can short-circuit if nothing changed. Uses the pre-computed scan taken
+    // at the top of this function (current_max_mtime / current_dir_count).
+    save_last_reindex(current_max_mtime, current_dir_count);
     Ok(())
 }
 

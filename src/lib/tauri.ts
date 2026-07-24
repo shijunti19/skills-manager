@@ -861,3 +861,22 @@ export interface OrganizeResult {
  */
 export const organizeAgentSkills = (agentKey: string, keepSkillIds: string[]) =>
   invoke<OrganizeResult>("organize_agent_skills", { agentKey, keepSkillIds });
+
+// ── Strip skill descriptions (clear description field in agent's SKILL.md files) ──
+
+export interface StripDescriptionsResult {
+  /** Skills whose description field was actually removed. */
+  stripped: number;
+  /** Skills with no description to remove. */
+  skipped: number;
+  /** Total skill directories scanned. */
+  total: number;
+}
+
+/**
+ * Clear the `description` field from every skill's SKILL.md under an agent's
+ * global skills directory. Guarded by: sync_mode must be "copy" AND no skill
+ * dir may be a symlink/junction. Throws a descriptive error otherwise.
+ */
+export const stripAgentSkillDescriptions = (agentKey: string) =>
+  invoke<StripDescriptionsResult>("strip_agent_skill_descriptions", { agentKey });

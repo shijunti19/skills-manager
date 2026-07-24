@@ -542,6 +542,7 @@ mod tests {
                     skills_dir: legacy_skills.to_string_lossy().into_owned(),
                     project_relative_skills_dir: Some(".legacy/skills".to_string()),
                     category: ToolCategory::Lobster,
+                    skills_prompt_spec: None,
                 },
                 CustomToolDef {
                     key: "custom_agent".to_string(),
@@ -549,6 +550,7 @@ mod tests {
                     skills_dir: tmp.path().join("custom-skills").to_string_lossy().into_owned(),
                     project_relative_skills_dir: Some(".custom/skills".to_string()),
                     category: ToolCategory::Lobster,
+                    skills_prompt_spec: None,
                 },
             ],
         )
@@ -574,6 +576,7 @@ mod tests {
                 skills_dir: legacy_skills.to_string_lossy().into_owned(),
                 project_relative_skills_dir: Some(".legacy/skills".to_string()),
                 category: ToolCategory::Lobster,
+                skills_prompt_spec: None,
             }],
         )
         .unwrap();
