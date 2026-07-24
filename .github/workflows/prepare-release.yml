@@ -36,7 +36,7 @@ jobs:
       # The old package-lock.json predates the TS 7.0.2 upgrade and would
       # break npm ci with ERESOLVE against typescript-eslint 8.65.0.
       - name: Install pnpm
-        uses: pnpm/action-setup@a74872c4d3557d4cb5ff84791b5b24655a934a3b # v4
+        uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
         with:
           version: 11
 
