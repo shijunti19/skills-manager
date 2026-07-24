@@ -578,15 +578,49 @@ mod tests {
 
     #[test]
     fn test_newer_schema_rejected() {
+        // Forward-compat: a newer-schema DB is NOT hard-rejected — that would
+        // lock the user out of their data after a downgrade. The app runs the
+        // idempotent "ensure" passes so every column THIS version expects
+        // exists, then returns Ok and logs a warning. The runtime code path
+        // that surfaces the version gap to the user is the warning log; the
+        // test pins both halves of the contract (no error, AND an ensure pass
+        // actually ran — if ensure is skipped, the column check below fails).
         let conn = Connection::open_in_memory().unwrap();
+        // Seed a newer-schema `smart_tags` table WITHOUT the `prompt` and
+        // `agents` columns this version's ensure pass expects to add. If
+        // run_migrations skips ensure, the column checks below fail.
+        conn.execute_batch(
+            "CREATE TABLE smart_tags (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL UNIQUE,
+                description TEXT,
+                icon TEXT,
+                sort_order INTEGER DEFAULT 0,
+                created_at INTEGER,
+                updated_at INTEGER
+            );",
+        )
+        .unwrap();
         conn.pragma_update(None, "user_version", LATEST_VERSION + 1)
             .unwrap();
 
-        let err = run_migrations(&conn).unwrap_err();
-        let msg = err.to_string();
+        // Must succeed (no Err) on a forward-compat DB.
+        run_migrations(&conn).unwrap();
+
+        // ensure pass must have run: smart_tags gained the `prompt` and
+        // `agents` columns this version expects.
         assert!(
-            msg.contains("newer than this app supports"),
-            "unexpected error: {msg}"
+            has_column(&conn, "smart_tags", "prompt").unwrap(),
+            "forward-compat path should still run ensure passes (prompt)"
         );
+        assert!(
+            has_column(&conn, "smart_tags", "agents").unwrap(),
+            "forward-compat path should still run ensure passes (agents)"
+        );
+        // Version is left alone (we never downgrade user_version).
+        let version: u32 = conn
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, LATEST_VERSION + 1);
     }
 }

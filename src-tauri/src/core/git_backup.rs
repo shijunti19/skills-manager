@@ -1396,7 +1396,17 @@ pub(crate) fn ensure_no_interrupted_git_operation(skills_dir: &Path) -> Result<(
 
 fn ensure_gitignore(skills_dir: &Path) -> Result<()> {
     let gitignore = skills_dir.join(".gitignore");
-    let required = [".DS_Store", "Thumbs.db", "*.tmp", ".skills-manager.lock"];
+    // Required ignore lines managed by the app. `.skills-manager/last_reindex.json`
+    // is a per-machine reindex cache that is rewritten on every restart — must
+    // not enter commits or it triggers spurious merges/empty commits and
+    // content conflicts between devices.
+    let required = [
+        ".DS_Store",
+        "Thumbs.db",
+        "*.tmp",
+        ".skills-manager.lock",
+        ".skills-manager/last_reindex.json",
+    ];
     let mut lines: Vec<String> = if gitignore.exists() {
         std::fs::read_to_string(&gitignore)?
             .lines()
@@ -1407,10 +1417,18 @@ fn ensure_gitignore(skills_dir: &Path) -> Result<()> {
     };
     let existing: std::collections::HashSet<String> =
         lines.iter().map(|line| line.trim().to_string()).collect();
+    let mut changed = false;
     for line in required {
         if !existing.contains(line) {
             lines.push(line.to_string());
+            changed = true;
         }
+    }
+    // Skip the rewrite when nothing changed: touching the file's mtime on
+    // every sync would force an empty commit and break the "second sync is a
+    // no-op" guarantee (`sync_transaction_commits_merges_and_pushes_in_one_call`).
+    if !changed && gitignore.exists() {
+        return Ok(());
     }
     std::fs::write(&gitignore, format!("{}\n", lines.join("\n")))?;
     Ok(())
