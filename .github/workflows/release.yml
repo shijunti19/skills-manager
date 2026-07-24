@@ -41,7 +41,16 @@ jobs:
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 22
-          cache: npm
+
+      # Install pnpm so we use the in-repo pnpm-lock.yaml (which is in sync
+      # with package.json). The legacy package-lock.json predates the
+      # TS 7.0.2 / typescript-eslint 8.65.0 upgrade and triggers npm ci's
+      # strict package.json/lockfile mismatch → ERESOLVE peer conflict.
+      # pnpm's autoInstallPeers handles the optional TS 7.x peer cleanly.
+      - name: Install pnpm
+        uses: pnpm/action-setup@a74872c4d3557d4cb5ff84791b5b24655a934a3b # v4
+        with:
+          version: 11
 
       - name: Setup Rust toolchain
         uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
@@ -70,7 +79,7 @@ jobs:
             patchelf
 
       - name: Install frontend dependencies
-        run: npm ci
+        run: pnpm install --frozen-lockfile
 
       - name: Windows smoke check
         if: matrix.platform == 'windows-latest'

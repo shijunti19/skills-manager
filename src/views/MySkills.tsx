@@ -144,13 +144,11 @@ function SkillsListDialog({
   open,
   skills,
   smartTags,
-  smartTagsMap,
   onClose,
 }: {
   open: boolean;
   skills: ManagedSkill[];
   smartTags: api.SmartTag[];
-  smartTagsMap: Record<string, string[]>;
   onClose: () => void;
 }) {
   const { t } = useTranslation();
@@ -158,11 +156,6 @@ function SkillsListDialog({
   const [view, setView] = useState<SkillsListView>("grouped");
 
   if (!open) return null;
-
-  // Plain list: "name: description" per line.
-  const plainText = skills
-    .map((s) => `${s.name}: ${skillDescription(s)}`)
-    .join("\n");
 
   // Format one skill line: "name: desc  path  github" — description first
   // (falling back to path/github when empty), then directory path, then the
@@ -1975,7 +1968,6 @@ export function MySkills() {
         open={skillsListOpen}
         skills={filtered}
         smartTags={smartTags}
-        smartTagsMap={smartTagsMap}
         onClose={() => setSkillsListOpen(false)}
       />
       <SkillTagPickerDialog
