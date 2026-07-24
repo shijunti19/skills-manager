@@ -38,5 +38,6 @@ CLAUDE.md
 .loop-log
 
 /.a031
+/.a031/secrets/
 /.zcode
 /build.ps1

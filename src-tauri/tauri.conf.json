@@ -30,7 +30,7 @@
   },
   "plugins": {
     "updater": {
-      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IERBRUYwMTBDOEQ3MDdEODAKUldTQWZYQ05EQUh2Mm0wNDZtNm5VYWJpbjRaZVJQRUhrQ2tkOXc3MHBWZ2VaREo0OVd3WEU3d0oK",
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDdGNUIxMTQ0MTg1QTM5RUUKUldUdU9Wb1lSQkZiZjMvZ1FZWDFRcWNTYlFiUzhiOHI3aUhYV0pmREI3S2hXMmxnQnlsU0RIYkMK",
       "endpoints": [
         "https://github.com/xingkongliang/skills-manager/releases/latest/download/latest.json"
       ]

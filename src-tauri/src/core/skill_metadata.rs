@@ -171,7 +171,7 @@ pub fn infer_skill_name(dir: &Path) -> String {
 /// Outcome of [`strip_description_from_skill_dir`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StripOutcome {
-    /// A `description` field was found and removed from the frontmatter.
+    /// A `description` field was found and its value was cleared (key kept).
     Stripped,
     /// The SKILL.md had a frontmatter but no `description` field.
     NoDescription,
@@ -179,8 +179,9 @@ pub enum StripOutcome {
     NotASkill,
 }
 
-/// Remove the `description` field (and its value) from a SKILL.md document,
-/// preserving everything else byte-for-byte.
+/// Clear the `description` field value in a SKILL.md document, keeping the
+/// key (`description:`) present but with an empty value.
+/// Everything else is preserved byte-for-byte.
 ///
 /// Handles all common YAML representations of the value:
 /// - Plain / single-quoted / double-quoted scalars on one line
@@ -278,13 +279,20 @@ pub fn strip_description_line(content: &str) -> String {
         key_idx
     };
 
-    // Rebuild the document without the removed span.
+    // Rebuild the document: keep `description:` key but clear its value.
     let mut out = String::with_capacity(content.len());
     for (i, line) in lines.iter().enumerate() {
-        if i >= key_idx && i <= last_to_remove {
-            continue;
+        if i == key_idx {
+            // Preserve the `description:` key with an empty value.
+            // Preserve the original line ending style (\n or \r\n).
+            let ending = if line.ends_with("\r\n") { "\r\n" } else { "\n" };
+            out.push_str("description:");
+            out.push_str(ending);
+        } else if i > key_idx && i <= last_to_remove {
+            continue; // skip block scalar body lines (if any)
+        } else {
+            out.push_str(line);
         }
-        out.push_str(line);
     }
     out
 }
@@ -579,16 +587,19 @@ mod tests {
     fn strip_description_single_line() {
         let content = "---\nname: foo\ndescription: hello world\n---\nbody\n";
         let out = strip_description_line(content);
-        assert!(!out.contains("description"));
+        // `description:` key stays, value is cleared
+        assert!(out.contains("description:"));
         assert!(out.contains("name: foo"));
         assert!(out.contains("body"));
+        // Check exact output
+        assert_eq!(out, "---\nname: foo\ndescription:\n---\nbody\n");
     }
 
     #[test]
     fn strip_description_quoted_value() {
         let content = "---\nname: foo\ndescription: \"a 'b' c\"\n---\n";
         let out = strip_description_line(content);
-        assert!(!out.contains("description"));
+        assert!(out.contains("description:"));
         assert!(out.contains("name: foo"));
     }
 
@@ -596,7 +607,8 @@ mod tests {
     fn strip_description_block_scalar_literal() {
         let content = "---\nname: foo\ndescription: |\n  line one\n  line two\n---\nbody\n";
         let out = strip_description_line(content);
-        assert!(!out.contains("description"));
+        // `description:` key stays empty, block body removed
+        assert!(out.contains("description:"));
         assert!(!out.contains("line one"));
         assert!(!out.contains("line two"));
         assert!(out.contains("name: foo"));
@@ -607,7 +619,7 @@ mod tests {
     fn strip_description_block_scalar_folded() {
         let content = "---\nname: foo\ndescription: >\n  folded\n  text\n---\n";
         let out = strip_description_line(content);
-        assert!(!out.contains("description"));
+        assert!(out.contains("description:"));
         assert!(!out.contains("folded"));
         assert!(out.contains("name: foo"));
     }
@@ -630,10 +642,10 @@ mod tests {
     fn strip_description_preserves_other_fields() {
         let content = "---\nname: foo\nauthor: me\ndescription: bar\nversion: 1.0\n---\n";
         let out = strip_description_line(content);
-        // Other keys must stay in their original order.
+        // `description:` key stays with empty value, other keys in original order.
         assert_eq!(
             out,
-            "---\nname: foo\nauthor: me\nversion: 1.0\n---\n".to_string()
+            "---\nname: foo\nauthor: me\ndescription:\nversion: 1.0\n---\n".to_string()
         );
     }
 
@@ -657,7 +669,8 @@ mod tests {
     fn strip_description_handles_crlf() {
         let content = "---\r\nname: foo\r\ndescription: bar\r\n---\r\n";
         let out = strip_description_line(content);
-        assert!(!out.contains("description"));
+        // `description:` key stays with empty value, CRLF preserved
+        assert!(out.contains("description:"));
         assert!(out.contains("name: foo"));
     }
 
@@ -665,7 +678,8 @@ mod tests {
     fn strip_description_empty_value() {
         let content = "---\nname: foo\ndescription:\n---\n";
         let out = strip_description_line(content);
-        assert!(!out.contains("description"));
+        // Already empty or absent → keep as-is (NoDescription path in dir-level)
+        assert_eq!(out, content);
     }
 
     // ── strip_description_from_skill_dir ──
@@ -686,7 +700,8 @@ mod tests {
             StripOutcome::Stripped
         );
         let after = fs::read_to_string(skill_dir.join("SKILL.md")).unwrap();
-        assert!(!after.contains("description"));
+        // `description:` key stays, value cleared
+        assert!(after.contains("description:"));
         assert!(after.contains("body"));
     }
 
@@ -722,10 +737,6 @@ mod tests {
 
     #[test]
     fn strip_from_skill_dir_prefers_skill_md() {
-        // Note: on case-insensitive filesystems (Windows/macOS default),
-        // SKILL.md and skill.md collide, so we only seed the canonical
-        // uppercase form here. The lowercase-fallback path is exercised by
-        // strip_from_skill_dir_uses_lowercase_skill_md below.
         let tmp = tempdir().unwrap();
         let skill_dir = tmp.path().join("foo");
         fs::create_dir_all(&skill_dir).unwrap();
@@ -740,7 +751,8 @@ mod tests {
             StripOutcome::Stripped
         );
         let after = fs::read_to_string(skill_dir.join("SKILL.md")).unwrap();
-        assert!(!after.contains("description"));
+        // `description:` key stays, value cleared
+        assert!(after.contains("description:"));
         assert!(after.contains("name: up"));
     }
 
@@ -760,7 +772,8 @@ mod tests {
             StripOutcome::Stripped
         );
         let after = fs::read_to_string(skill_dir.join("skill.md")).unwrap();
-        assert!(!after.contains("description"));
+        // `description:` key stays, value cleared
+        assert!(after.contains("description:"));
         assert!(after.contains("name: low"));
     }
 }

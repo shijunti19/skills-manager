@@ -585,9 +585,9 @@ pub async fn update_global_local_skill_from_center(
 /// Result of [`strip_agent_skill_descriptions`].
 #[derive(serde::Serialize)]
 pub struct StripDescriptionsDto {
-    /// Number of skills whose `description` field was actually removed.
+    /// Number of skills whose `description` field value was actually cleared.
     pub stripped: usize,
-    /// Number of skills that had no `description` to remove.
+    /// Number of skills that had no `description` value to clear.
     pub skipped: usize,
     /// Total number of skill directories scanned.
     pub total: usize,

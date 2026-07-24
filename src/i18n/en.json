@@ -1125,7 +1125,7 @@
     "stripDone": "Stripped descriptions from {{stripped}} skills under {{agent}} ({{skipped}} skipped)",
     "stripFailed": "Failed to strip descriptions",
     "stripConfirmTitle": "Confirm strip descriptions",
-    "stripConfirmMessage": "This will DELETE the description field from every skill's SKILL.md under {{agent}} (requires file-copy mode). This is not undoable. Continue?",
+    "stripConfirmMessage": "This will CLEAR the description field from every skill's SKILL.md under {{agent}} (requires file-copy mode). This is not undoable. Continue?",
     "stripConfirmAction": "Strip descriptions",
     "clearFilter": "Show all",
     "tagFilteredSummary": "{{count}} skills",

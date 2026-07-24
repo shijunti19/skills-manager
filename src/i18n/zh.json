@@ -1125,7 +1125,7 @@
     "stripDone": "已清空 {{agent}} 下 {{stripped}} 个技能的描述（跳过 {{skipped}} 个）",
     "stripFailed": "清空描述失败",
     "stripConfirmTitle": "确认清空描述",
-    "stripConfirmMessage": "将在 {{agent}} 目录下，把所有技能的 SKILL.md 中的 description 字段删除（需文件复制模式）。该操作不可撤销，确认继续？",
+    "stripConfirmMessage": "将在 {{agent}} 目录下，把所有技能的 SKILL.md 中的 description 字段清空（需文件复制模式）。该操作不可撤销，确认继续？",
     "stripConfirmAction": "清空描述",
     "clearFilter": "显示全部",
     "tagFilteredSummary": "{{count}} 个技能",
