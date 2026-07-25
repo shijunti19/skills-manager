@@ -11,7 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 _Nothing yet._
 
 ### User-facing
-_Nothing yet._
+- Release workflow now exposes two local CLI commands (`release:prepare` and `release:tag`) so the user keeps full control over commit/push, while the AI can prepare the next version in one shot.
 
 ### Developer & Governance
 _Nothing yet._
