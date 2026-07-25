@@ -2,7 +2,7 @@ use anyhow::{bail, Context, Result};
 use rusqlite::{params, Connection};
 
 /// Current schema version. Bump this when adding a new migration.
-const LATEST_VERSION: u32 = 8;
+const LATEST_VERSION: u32 = 9;
 
 /// Run all pending migrations on the database.
 ///
@@ -63,6 +63,7 @@ fn migrate_step(conn: &Connection, from_version: u32) -> Result<()> {
         5 => migrate_v5_to_v6(conn),
         6 => migrate_v6_to_v7(conn),
         7 => migrate_v7_to_v8(conn),
+        8 => migrate_v8_to_v9(conn),
         _ => bail!("unknown migration version: {from_version}"),
     }
 }
@@ -352,6 +353,66 @@ fn migrate_v7_to_v8(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
+/// v8 → v9: Normalize `skill_smart_tag_relations` to the 2-column schema
+/// (skill_id, smart_tag_id) that this fork's migrations.rs declared in v7→v8.
+///
+/// Background: a since-reverted intermediate build created the table with an
+/// extra `created_at INTEGER NOT NULL` column. Databases from that build
+/// (including any produced by users who ran it) violate the 2-column INSERT
+/// that all the read/write helpers in skill_store.rs use, so every
+/// `INSERT OR IGNORE INTO skill_smart_tag_relations (skill_id, smart_tag_id)
+/// VALUES (?, ?)` silently failed with NOT NULL constraint violation —
+/// surfaced as "smart tag bindings never persist after refresh" in the UI.
+///
+/// This migration rebuilds the table with exactly the two columns the code
+/// expects, preserving all existing (skill_id, smart_tag_id) pairs. Safe to
+/// run on a 2-column table (it's a no-op detected via has_column).
+fn migrate_v8_to_v9(conn: &Connection) -> Result<()> {
+    normalize_smart_tag_relations_schema(conn)
+}
+
+/// Rebuild `skill_smart_tag_relations` to the 2-column schema if it has a
+/// `created_at` column (or any extra column). Idempotent: a table already on
+/// the 2-column schema is left untouched. Used both by the v8→v9 migration
+/// and by `run_ensure_passes` (to repair databases whose user_version is
+/// already > LATEST_VERSION and thus skip the normal migration chain).
+fn normalize_smart_tag_relations_schema(conn: &Connection) -> Result<()> {
+    if !has_table(conn, "skill_smart_tag_relations")? {
+        return Ok(());
+    }
+    // Only rebuild when the table has MORE than the expected (skill_id,
+    // smart_tag_id) columns. A 2-column table is already canonical.
+    let mut stmt = conn.prepare("PRAGMA table_info(skill_smart_tag_relations)")?;
+    let column_count: usize = stmt.query_map([], |_| Ok(()))?.count();
+    if column_count <= 2 {
+        return Ok(());
+    }
+    log::info!(
+        "normalizing skill_smart_tag_relations: rebuilding {}-column table to canonical 2-column schema",
+        column_count
+    );
+    conn.execute_batch(
+        "
+        BEGIN;
+        CREATE TABLE skill_smart_tag_relations_new (
+            skill_id TEXT NOT NULL REFERENCES skills(id) ON DELETE CASCADE,
+            smart_tag_id TEXT NOT NULL REFERENCES smart_tags(id) ON DELETE CASCADE,
+            PRIMARY KEY(skill_id, smart_tag_id)
+        );
+        INSERT OR IGNORE INTO skill_smart_tag_relations_new (skill_id, smart_tag_id)
+            SELECT skill_id, smart_tag_id FROM skill_smart_tag_relations;
+        DROP TABLE skill_smart_tag_relations;
+        ALTER TABLE skill_smart_tag_relations_new RENAME TO skill_smart_tag_relations;
+        CREATE INDEX IF NOT EXISTS idx_skill_smart_tag_relations_skill_id
+            ON skill_smart_tag_relations(skill_id);
+        CREATE INDEX IF NOT EXISTS idx_skill_smart_tag_relations_smart_tag_id
+            ON skill_smart_tag_relations(smart_tag_id);
+        COMMIT;
+        ",
+    )?;
+    Ok(())
+}
+
 /// Idempotent "ensure" passes for databases that come from a newer app
 /// version (current > LATEST_VERSION). Makes sure every column THIS version's
 /// code reads/writes exists, without touching the schema version number.
@@ -368,6 +429,12 @@ fn run_ensure_passes(conn: &Connection) -> Result<()> {
         add_column_if_missing(conn, "smart_tags", "prompt", "TEXT")?;
         add_column_if_missing(conn, "smart_tags", "agents", "TEXT NOT NULL DEFAULT '[]'")?;
     }
+    // Repair any `skill_smart_tag_relations` table that came from a newer
+    // (since-reverted) build with an extra `created_at NOT NULL` column: our
+    // 2-column INSERTs would otherwise silently fail with NOT NULL constraint
+    // violations masked by INSERT OR IGNORE. Idempotent — no-op on the
+    // canonical 2-column schema.
+    normalize_smart_tag_relations_schema(conn)?;
     Ok(())
 }
 

@@ -396,30 +396,13 @@ export function MySkills() {
   }, [refreshSmartTags]);
 
   // ─── 标签写操作串行队列 + 乐观更新 ─────────────────────────────────
-  // 原因：三个标签 handler 都是 async + await refresh。每次点击都要等后端写完
-  // + 重拉整张技能表，MySkills（2000 行）在等待期间卡死，连点全丢。
-  //
-  // 设计（关键铁律）：
-  //   1) 点击瞬间：patchManagedSkill / setSmartTagsMap 立即更新 UI（按钮秒回弹）
-  //   2) 后端写入丢进串行队列排队（避免并发写冲突，前一个失败不阻塞后一个）
-  //   3) 写成功 → 标记需要 refresh，等队列 drain 后做一次合并刷新（连点期间
-  //      不重复触发 refresh，避免把还在队列里没写完的中间态拉回来）
-  //   4) 写失败 → 立刻 refresh 回滚 + onRollback，让真实状态覆盖乐观层
+  // 设计：
+  //   1) 点击瞬间：patchManagedSkill / setSmartTagsMap 立即更新 UI
+  //   2) 后端写入丢进串行队列排队（避免并发写冲突）
+  //   3) 写成功 → 不做任何事（乐观层就是最终态，刷新反而会把 DB 中间态拉回
+  //      来覆盖掉乐观更新，引起打钩弹回的 bug）
+  //   4) 写失败 → toast 报错 + refresh 回滚 + onRollback 恢复乐观态
   const writeQueueRef = useRef<Promise<void>>(Promise.resolve());
-  const needsRefreshRef = useRef(false);
-  const refreshTimerRef = useRef<number | null>(null);
-  const flushAfterQueue = useCallback(() => {
-    if (!needsRefreshRef.current) return;
-    needsRefreshRef.current = false;
-    if (refreshTimerRef.current !== null) {
-      window.clearTimeout(refreshTimerRef.current);
-    }
-    // 50ms debounce：队列刚空时可能还有下一个 click 进来，把它们合到同一刷
-    refreshTimerRef.current = window.setTimeout(() => {
-      refreshTimerRef.current = null;
-      Promise.all([refreshManagedSkills(), refreshSmartTags()]).catch(() => {});
-    }, 50);
-  }, [refreshManagedSkills, refreshSmartTags]);
   const enqueueWrite = useCallback(
     (task: () => Promise<void>, onRollback: () => void) => {
       console.log("[enqueueWrite] 排队写入任务");
@@ -430,15 +413,9 @@ export function MySkills() {
           try {
             await task();
             console.log("[enqueueWrite] task 成功完成");
-            // 成功：标记需要 refresh，队列 drain 后合并刷一次，把后端真
-            // 实态（包括其他字段）拉回来覆盖乐观层，避免「乐观更新了某
-            // 个字段但实际后端写错了/被别的逻辑改了」造成 UI 与 DB 不一致
-            needsRefreshRef.current = true;
-            flushAfterQueue();
           } catch (error) {
             console.error("[enqueueWrite] task 失败:", error);
             toast.error(getErrorMessage(error, t("common.error")));
-            // 失败：refresh 全量拉真实状态覆盖乐观层
             try {
               await Promise.all([refreshManagedSkills(), refreshSmartTags()]);
             } catch {
@@ -448,7 +425,7 @@ export function MySkills() {
           }
         });
     },
-    [t, refreshManagedSkills, refreshSmartTags, flushAfterQueue],
+    [t, refreshManagedSkills, refreshSmartTags],
   );
 
   const [presetSkillOrder, setPresetSkillOrder] = useState<string[]>([]);

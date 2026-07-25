@@ -1613,10 +1613,14 @@ impl SkillStore {
 
     /// Replace the set of smart tags bound to a skill (full sync semantics):
     /// delete all existing bindings for the skill, then insert the new set.
-    /// `skill_smart_tag_relations` has exactly (skill_id, smart_tag_id) in this
-    /// fork's schema; the previous "try created_at column then fall back"
-    /// dance was for a since-reverted build that no longer exists and masked
-    /// real errors (FK violation, disk full) as "column missing".
+    ///
+    /// The table schema is the canonical 2-column (skill_id, smart_tag_id)
+    /// declared in migrations.rs v7→v8 and normalized by migrate_v8_to_v9 /
+    /// run_ensure_passes. We use plain INSERT (not INSERT OR IGNORE) so any
+    /// real error (FK violation, disk full, schema drift) surfaces immediately
+    /// — the previous OR IGNORE silently swallowed NOT NULL constraint failures
+    /// on databases that had an extra `created_at` column, which presented in
+    /// the UI as "smart tag bindings vanish after refresh" with no error log.
     pub fn set_smart_tags_for_skill(&self, skill_id: &str, smart_tag_ids: &[String]) -> Result<()> {
         let conn = self.conn.lock().unwrap();
         let tx = conn.unchecked_transaction()?;
@@ -1628,7 +1632,7 @@ impl SkillStore {
             let trimmed = tag_id.trim();
             if !trimmed.is_empty() {
                 tx.execute(
-                    "INSERT OR IGNORE INTO skill_smart_tag_relations
+                    "INSERT INTO skill_smart_tag_relations
                         (skill_id, smart_tag_id) VALUES (?1, ?2)",
                     params![skill_id, trimmed],
                 )?;
@@ -1638,9 +1642,10 @@ impl SkillStore {
         Ok(())
     }
 
-    /// Bind a skill to a single smart tag (idempotent). See
-    /// [`set_smart_tags_for_skill`] for why this targets the 2-column schema
-    /// directly rather than probing for a `created_at` column.
+    /// Bind a skill to a single smart tag. Idempotent across re-runs because
+    /// (skill_id, smart_tag_id) is the PRIMARY KEY; a duplicate insert raises
+    /// SQLITE_CONSTRAINT_PRIMARYKEY, which callers may legitimately ignore —
+    /// so this uses INSERT OR IGNORE narrowly for that specific case.
     pub fn bind_smart_tag_to_skill(&self, skill_id: &str, smart_tag_id: &str) -> Result<()> {
         let conn = self.conn.lock().unwrap();
         conn.execute(
@@ -1762,12 +1767,14 @@ impl SkillStore {
                 if trimmed.is_empty() {
                     continue;
                 }
-                // skill_smart_tag_relations has exactly (skill_id, smart_tag_id)
-                // in this fork's schema (migrations.rs v7→v8). INSERT OR IGNORE
-                // keeps the import idempotent across re-runs on the same set.
+                // Idempotent across re-runs: ON CONFLICT DO NOTHING targets the
+                // (skill_id, smart_tag_id) PRIMARY KEY only — any other error
+                // (FK violation, NOT NULL, disk full) propagates and aborts the
+                // whole atomic transaction, which is what callers expect.
                 tx.execute(
-                    "INSERT OR IGNORE INTO skill_smart_tag_relations
-                        (skill_id, smart_tag_id) VALUES (?1, ?2)",
+                    "INSERT INTO skill_smart_tag_relations
+                        (skill_id, smart_tag_id) VALUES (?1, ?2)
+                        ON CONFLICT(skill_id, smart_tag_id) DO NOTHING",
                     params![trimmed, id],
                 )?;
                 bindings_created += 1;
