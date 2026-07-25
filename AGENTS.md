@@ -86,3 +86,65 @@ await Promise.all([refreshManagedSkills(), refreshTools(), loadLocalSkills()]);
 - 单技能行状态徽章样式参考：`src/components/SkillPickerRow.tsx`（emerald=已同步 / rose=冲突 / surface-hover=不可用）。
 - Agent skills_prompt_spec 字段：后端 `tool_adapters.rs`（CustomToolDef）+ `tool_service.rs`（ToolInfo 合并 custom/内置 spec）+ 设置页编辑 UI。
 
+## 发布流程（AI 改完代码后必走）
+
+> 本节是**强约束**，违反会导致发版失败 / tag 错位 / 触发空 release。
+
+### 改代码期间（每次提交前必做）
+
+AI 每次实现完成后，**必须**把变更 bullet 写入两个 CHANGELOG 顶部的 `[Unreleased]` / `[未发布]` 区：
+
+- `CHANGELOG.md` → 找 `## [Unreleased]` 章节下的 `### User-facing` / `### Developer & Governance`
+- `CHANGELOG-zh.md` → 找 `## [未发布]` 章节下的 `### 用户可见更新` / `### 开发者与治理更新`
+
+要求：
+
+- 一个变更至少写一条 bullet（中英文各一条，不要只写中文）
+- bullet 用用户视角描述"行为变化" + "为什么"，不是 commit subject 的复读
+- `### Release Overview` / `### 发布概览` 由人类写，AI 不要动
+- 不要把 placeholder `_Nothing yet._` / `_暂无。_` 之外的空 bullet 留作占位
+
+如果仓库里**还没有** `[Unreleased]` 骨架（首次启用时），跑一次：
+
+```bash
+npm run release:ensure-unreleased
+```
+
+幂等，已存在则不动。
+
+### 用户决定发布
+
+```bash
+# 1. 准备：bump 版本号 + 把 [Unreleased] 转成 [X.Y.Z] + 清空 [Unreleased]
+#    工作区不提交
+npm run release:prepare -- patch      # 或 minor / major / 1.28.5
+
+# 2. 用户检查
+git diff
+
+# 3. 用户手动提交
+git add CHANGELOG.md CHANGELOG-zh.md package.json src-tauri/tauri.conf.json \
+        src/i18n/en.json src/i18n/zh.json src/i18n/zh-TW.json
+git commit -m "chore(release): bump version to X.Y.Z"
+
+# 4. 打本地 tag（不 push）
+npm run release:tag -- X.Y.Z
+
+# 5. 用户手动推送，触发 GitHub Actions 4 平台打包
+git push --follow-tags
+```
+
+### 铁律
+
+- 任何 release 脚本**永远不**自动 commit / push / push tag
+- `[Unreleased]` / `[未发布]` 区为空时禁止发版（脚本会拒绝）
+- 工作区脏时禁止发版 / 打 tag（脚本会拒绝）
+- `release:tag` 的版本号必须等于 `package.json` 当前版本（脚本会拒绝）
+- 已有同名 tag 时禁止打 tag（脚本会拒绝，需 `git tag -d vX.Y.Z` 后重打）
+
+### 失败回滚
+
+- `release:prepare` 后想放弃：`git checkout -- CHANGELOG.md CHANGELOG-zh.md package.json src-tauri/tauri.conf.json src/i18n/{en,zh,zh-TW}.json` 即可，未提交任何东西
+- `release:tag` 后想放弃：`git tag -d vX.Y.Z`
+- `git push --follow-tags` 后想撤回：参考 GitHub Release 的删除 + 强制覆盖流程（一般不需要）
+
