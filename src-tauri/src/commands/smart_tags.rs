@@ -11,7 +11,7 @@ use tauri::State;
 
 use crate::core::{
     error::AppError,
-    skill_store::{SmartTagImportEntry, SmartTagRecord, SkillStore},
+    skill_store::{SkillStore, SmartTagImportEntry, SmartTagRecord},
 };
 
 /// Frontend-facing smart tag DTO. `agents` is surfaced as a parsed Vec so
@@ -83,10 +83,8 @@ pub async fn get_smart_tags_map(
     store: State<'_, Arc<SkillStore>>,
 ) -> Result<std::collections::HashMap<String, Vec<String>>, AppError> {
     let store = store.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || {
-        store.get_smart_tags_map().map_err(AppError::db)
-    })
-    .await?
+    tauri::async_runtime::spawn_blocking(move || store.get_smart_tags_map().map_err(AppError::db))
+        .await?
 }
 
 /// Create a new smart tag. Returns the created tag (with its generated id).
@@ -165,10 +163,8 @@ pub async fn delete_smart_tag_ext(
     store: State<'_, Arc<SkillStore>>,
 ) -> Result<(), AppError> {
     let store = store.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || {
-        store.delete_smart_tag(&id).map_err(AppError::db)
-    })
-    .await?
+    tauri::async_runtime::spawn_blocking(move || store.delete_smart_tag(&id).map_err(AppError::db))
+        .await?
 }
 
 /// Return the list of smart-tag ids bound to a skill.
@@ -179,7 +175,9 @@ pub async fn get_smart_tag_ids_for_skill(
 ) -> Result<Vec<String>, AppError> {
     let store = store.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
-        store.get_smart_tag_ids_for_skill(&skill_id).map_err(AppError::db)
+        store
+            .get_smart_tag_ids_for_skill(&skill_id)
+            .map_err(AppError::db)
     })
     .await?
 }
@@ -330,9 +328,7 @@ fn parse_import_text(text: &str) -> Result<ParsedImport, AppError> {
             continue;
         }
         if trimmed.starts_with('-') || trimmed.starts_with('•') {
-            let body = trimmed
-                .trim_start_matches(['-', '•', ' ', '*', '+'])
-                .trim();
+            let body = trimmed.trim_start_matches(['-', '•', ' ', '*', '+']).trim();
             if in_suggested_section {
                 // "技能名: github" — split on the first ':'.
                 if let Some(idx) = body.find(':') {
@@ -415,10 +411,10 @@ pub async fn import_smart_tags_from_text(
             });
         }
 
-        // Clear then rebuild, inside the bulk insert's own transaction.
-        store.clear_all_smart_tags().map_err(AppError::db)?;
+        // Atomic clear + rebuild in ONE transaction: if the rebuild fails the
+        // clear rolls back too, so existing tags survive a bad import.
         let (tags_created, bindings_created) = store
-            .bulk_import_smart_tags(&entries)
+            .reimport_smart_tags_atomic(&entries)
             .map_err(AppError::db)?;
 
         Ok(ImportResult {

@@ -347,9 +347,12 @@ fn classify_diff_bytes(bytes: Option<Vec<u8>>) -> (&'static str, Option<String>)
 /// Diff the whole content scope of two skill directories. `original_dir` is
 /// the central copy (old), `updated_dir` is the source (new). Uses the same
 /// file enumeration as the hash so it reports exactly what flips the badge.
-fn build_source_diff_entries(original_dir: &Path, updated_dir: &Path) -> Vec<SkillSourceDiffEntryDto> {
-    use std::collections::BTreeMap;
+fn build_source_diff_entries(
+    original_dir: &Path,
+    updated_dir: &Path,
+) -> Vec<SkillSourceDiffEntryDto> {
     use crate::core::content_hash::{self, ContentEntry};
+    use std::collections::BTreeMap;
 
     let index = |dir: &Path| -> BTreeMap<String, ContentEntry> {
         content_hash::list_content_files(dir)
@@ -720,14 +723,14 @@ pub async fn install_local(
                 remote_revision: None,
                 update_status: "local_only".to_string(),
             };
-            let _lock = RepoLock::acquire_foreground("install local skill").map_err(AppError::db)?;
+            let _lock =
+                RepoLock::acquire_foreground("install local skill").map_err(AppError::db)?;
             let result =
                 installer::install_from_local(&path, name.as_deref()).map_err(AppError::io)?;
             let skill_name = result.name.clone();
             // Install only adds the skill to the central library; preset
             // membership is an explicit action (see issue #213).
-            let skill_id =
-                store_installed_skill_unlocked(&store, &result, &metadata, None)?;
+            let skill_id = store_installed_skill_unlocked(&store, &result, &metadata, None)?;
             Ok((skill_id, skill_name))
         })();
         log_install_outcome(&store, "local", outcome.as_ref());
@@ -794,7 +797,8 @@ pub async fn install_git(
 
             emit_progress("installing");
             let install_result = (|| -> Result<(String, String), AppError> {
-                let _lock = RepoLock::acquire_foreground("install git skill").map_err(AppError::db)?;
+                let _lock =
+                    RepoLock::acquire_foreground("install git skill").map_err(AppError::db)?;
                 let skill_dir = resolve_skill_dir(&temp_dir, parsed.subpath.as_deref(), None)?;
                 let revision = git_fetcher::get_head_revision(&temp_dir).map_err(AppError::git)?;
                 let result = installer::install_from_git_dir(&skill_dir, name.as_deref())
@@ -810,12 +814,7 @@ pub async fn install_git(
                     update_status: "up_to_date".to_string(),
                 };
                 let skill_name = result.name.clone();
-                let skill_id = store_installed_skill_unlocked(
-                    &store,
-                    &result,
-                    &metadata,
-                    None,
-                )?;
+                let skill_id = store_installed_skill_unlocked(&store, &result, &metadata, None)?;
                 Ok((skill_id, skill_name))
             })();
 
@@ -890,7 +889,8 @@ pub async fn install_from_skillssh(
 
             emit_progress("installing");
             let install_result = (|| -> Result<(String, String), AppError> {
-                let _lock = RepoLock::acquire_foreground("install skillssh skill").map_err(AppError::db)?;
+                let _lock =
+                    RepoLock::acquire_foreground("install skillssh skill").map_err(AppError::db)?;
                 let skill_dir = resolve_skill_dir(&temp_dir, None, Some(&skill_id))?;
                 let revision = git_fetcher::get_head_revision(&temp_dir).map_err(AppError::git)?;
                 let source_ref = format!("{}/{}", source, skill_id);
@@ -913,12 +913,7 @@ pub async fn install_from_skillssh(
                     update_status: "up_to_date".to_string(),
                 };
                 let skill_name = result.name.clone();
-                let new_id = store_installed_skill_unlocked(
-                    &store,
-                    &result,
-                    &metadata,
-                    None,
-                )?;
+                let new_id = store_installed_skill_unlocked(&store, &result, &metadata, None)?;
                 Ok((new_id, skill_name))
             })();
 
@@ -1047,8 +1042,8 @@ pub async fn confirm_git_install(
             let skill_dir = resolve_skill_dir(&temp_path, parsed.subpath.as_deref(), None)?;
             let all_dirs = collect_git_skill_dirs(&skill_dir);
             let revision = git_fetcher::get_head_revision(&temp_path).map_err(AppError::git)?;
-            let _lock = RepoLock::acquire_foreground("confirm git install")
-                .map_err(AppError::db)?;
+            let _lock =
+                RepoLock::acquire_foreground("confirm git install").map_err(AppError::db)?;
 
             for dir in &all_dirs {
                 let rel_key = skill_rel_key(&skill_dir, dir);
@@ -1296,8 +1291,7 @@ pub async fn relink_local_skill_source(
             .map_err(AppError::db)?;
 
         let result = (|| -> Result<(), AppError> {
-            let _lock = RepoLock::acquire_foreground("relink local skill")
-                .map_err(AppError::db)?;
+            let _lock = RepoLock::acquire_foreground("relink local skill").map_err(AppError::db)?;
             let staged_path = staged_path_for(&skill.central_path);
             let install_result = installer::install_from_local_to_destination(
                 &path,
@@ -1357,8 +1351,7 @@ pub async fn detach_local_skill_source(
         }
 
         {
-            let _lock = RepoLock::acquire_foreground("detach local skill")
-                .map_err(AppError::db)?;
+            let _lock = RepoLock::acquire_foreground("detach local skill").map_err(AppError::db)?;
             store
                 .update_skill_after_reinstall(
                     &skill.id,
@@ -1440,7 +1433,10 @@ fn managed_skill_to_dto(
     }
 }
 
-pub fn managed_skill_by_id(store: &SkillStore, skill_id: &str) -> Result<ManagedSkillDto, AppError> {
+pub fn managed_skill_by_id(
+    store: &SkillStore,
+    skill_id: &str,
+) -> Result<ManagedSkillDto, AppError> {
     let skill = store
         .get_skill_by_id(skill_id)
         .map_err(AppError::db)?
@@ -1508,8 +1504,7 @@ pub fn update_git_skill_internal(
             crate::core::content_hash::hash_directory(&skill_dir).map_err(AppError::io)?;
         let content_changed = skill.content_hash.as_deref() != Some(new_hash.as_str());
         let source_subpath = git_fetcher::relative_subpath(&temp_dir, &skill_dir);
-        let _lock = RepoLock::acquire_foreground("update installed skill")
-            .map_err(AppError::db)?;
+        let _lock = RepoLock::acquire_foreground("update installed skill").map_err(AppError::db)?;
 
         if content_changed {
             let staged_path = staged_path_for(&skill.central_path);
@@ -1617,8 +1612,7 @@ pub fn reimport_local_skill_internal(
         .map_err(AppError::db)?;
 
     let result = (|| -> Result<(), AppError> {
-        let _lock = RepoLock::acquire_foreground("reimport local skill")
-            .map_err(AppError::db)?;
+        let _lock = RepoLock::acquire_foreground("reimport local skill").map_err(AppError::db)?;
         let staged_path = staged_path_for(&skill.central_path);
         let install_result =
             installer::install_from_local_to_destination(&path, Some(&skill.name), &staged_path)
@@ -2123,15 +2117,26 @@ pub async fn set_skill_tags(
     tags: Vec<String>,
     store: State<'_, Arc<SkillStore>>,
 ) -> Result<(), AppError> {
+    log::info!(
+        "[set_skill_tags] ENTER skill_id={} tags={:?}",
+        skill_id,
+        tags
+    );
     let store = store.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || {
+    let skill_id_for_log = skill_id.clone();
+    let result = tauri::async_runtime::spawn_blocking(move || {
         sync_metadata::with_repo_lock("set skill tags", || {
             store.set_tags_for_skill(&skill_id, &tags)?;
             sync_metadata::ensure_skill_metadata_unlocked(&store, &skill_id)
         })
         .map_err(AppError::db)
     })
-    .await?
+    .await?;
+    match &result {
+        Ok(()) => log::info!("[set_skill_tags] OK skill_id={skill_id_for_log}"),
+        Err(e) => log::error!("[set_skill_tags] FAIL skill_id={skill_id_for_log} err={e}"),
+    }
+    result
 }
 
 /// Globally rename a tag across all skills (used by the tag filter bar). If the
@@ -2256,8 +2261,8 @@ pub async fn batch_import_folder(
             }
 
             let install_result = (|| -> Result<String, AppError> {
-                let _lock = RepoLock::acquire_foreground("batch import skill")
-                    .map_err(AppError::db)?;
+                let _lock =
+                    RepoLock::acquire_foreground("batch import skill").map_err(AppError::db)?;
                 let result =
                     installer::install_from_local(dir, Some(&name)).map_err(AppError::io)?;
                 let metadata = InstallSourceMetadata {
@@ -2422,7 +2427,11 @@ mod tests {
         let dir = root.join(rel);
         fs::create_dir_all(&dir).unwrap();
         let basename = dir.file_name().unwrap().to_string_lossy().to_string();
-        fs::write(dir.join("SKILL.md"), format!("---\nname: {basename}\n---\n")).unwrap();
+        fs::write(
+            dir.join("SKILL.md"),
+            format!("---\nname: {basename}\n---\n"),
+        )
+        .unwrap();
         dir
     }
 

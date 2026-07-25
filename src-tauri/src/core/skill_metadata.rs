@@ -222,9 +222,10 @@ pub fn strip_description_line(content: &str) -> String {
     for i in 1..close_idx {
         let line = lines[i].trim_end_matches(['\r', '\n']);
         // Match `description:` at column 0 (top-level key only — nested keys
-        // under other mappings are indented and must be left alone).
-        let stripped = line.strip_prefix(' ').unwrap_or(line);
-        if !stripped.is_empty() && stripped.starts_with(' ') {
+        // under other mappings are indented and must be left alone). Indentation
+        // can be spaces OR tabs; the old single-space check let tab-indented
+        // nested `description:` slip through.
+        if !line.is_empty() && (line.starts_with(' ') || line.starts_with('\t')) {
             continue; // indented, not a top-level key
         }
         if let Some(rest) = line.strip_prefix("description:") {
@@ -247,7 +248,8 @@ pub fn strip_description_line(content: &str) -> String {
         .strip_prefix("description:")
         .unwrap_or("")
         .trim_start();
-    let last_to_remove = if key_value_trimmed == "|" || key_value_trimmed == ">"
+    let last_to_remove = if key_value_trimmed == "|"
+        || key_value_trimmed == ">"
         || key_value_trimmed.starts_with("|")
         || key_value_trimmed.starts_with(">")
     {

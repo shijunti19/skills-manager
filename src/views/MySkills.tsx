@@ -4,7 +4,7 @@ import {
   LayoutGrid,
   List,
   CheckCircle2,
-  GitFork as Github,
+  GitFork,
   HardDrive,
   Globe,
   Layers,
@@ -333,6 +333,7 @@ export function MySkills() {
     managedSkills: skills,
     refreshPresets,
     refreshManagedSkills,
+    patchManagedSkill,
     detailSkillId,
     openSkillDetailById,
     closeSkillDetail,
@@ -393,6 +394,62 @@ export function MySkills() {
   useEffect(() => {
     void refreshSmartTags();
   }, [refreshSmartTags]);
+
+  // ─── 标签写操作串行队列 + 乐观更新 ─────────────────────────────────
+  // 原因：三个标签 handler 都是 async + await refresh。每次点击都要等后端写完
+  // + 重拉整张技能表，MySkills（2000 行）在等待期间卡死，连点全丢。
+  //
+  // 设计（关键铁律）：
+  //   1) 点击瞬间：patchManagedSkill / setSmartTagsMap 立即更新 UI（按钮秒回弹）
+  //   2) 后端写入丢进串行队列排队（避免并发写冲突，前一个失败不阻塞后一个）
+  //   3) 写成功 → 标记需要 refresh，等队列 drain 后做一次合并刷新（连点期间
+  //      不重复触发 refresh，避免把还在队列里没写完的中间态拉回来）
+  //   4) 写失败 → 立刻 refresh 回滚 + onRollback，让真实状态覆盖乐观层
+  const writeQueueRef = useRef<Promise<void>>(Promise.resolve());
+  const needsRefreshRef = useRef(false);
+  const refreshTimerRef = useRef<number | null>(null);
+  const flushAfterQueue = useCallback(() => {
+    if (!needsRefreshRef.current) return;
+    needsRefreshRef.current = false;
+    if (refreshTimerRef.current !== null) {
+      window.clearTimeout(refreshTimerRef.current);
+    }
+    // 50ms debounce：队列刚空时可能还有下一个 click 进来，把它们合到同一刷
+    refreshTimerRef.current = window.setTimeout(() => {
+      refreshTimerRef.current = null;
+      Promise.all([refreshManagedSkills(), refreshSmartTags()]).catch(() => {});
+    }, 50);
+  }, [refreshManagedSkills, refreshSmartTags]);
+  const enqueueWrite = useCallback(
+    (task: () => Promise<void>, onRollback: () => void) => {
+      console.log("[enqueueWrite] 排队写入任务");
+      writeQueueRef.current = writeQueueRef.current
+        .catch(() => {}) // 前一个失败不阻塞后一个
+        .then(async () => {
+          console.log("[enqueueWrite] 开始执行 task");
+          try {
+            await task();
+            console.log("[enqueueWrite] task 成功完成");
+            // 成功：标记需要 refresh，队列 drain 后合并刷一次，把后端真
+            // 实态（包括其他字段）拉回来覆盖乐观层，避免「乐观更新了某
+            // 个字段但实际后端写错了/被别的逻辑改了」造成 UI 与 DB 不一致
+            needsRefreshRef.current = true;
+            flushAfterQueue();
+          } catch (error) {
+            console.error("[enqueueWrite] task 失败:", error);
+            toast.error(getErrorMessage(error, t("common.error")));
+            // 失败：refresh 全量拉真实状态覆盖乐观层
+            try {
+              await Promise.all([refreshManagedSkills(), refreshSmartTags()]);
+            } catch {
+              // refresh 也失败就没办法了，toast 已经报过错
+            }
+            onRollback();
+          }
+        });
+    },
+    [t, refreshManagedSkills, refreshSmartTags, flushAfterQueue],
+  );
 
   const [presetSkillOrder, setPresetSkillOrder] = useState<string[]>([]);
 
@@ -980,54 +1037,65 @@ export function MySkills() {
   };
 
   // Add a simple tag to a skill (no-op if already present).
-  const handleAddSimpleTag = async (skill: ManagedSkill, name: string) => {
+  // 乐观更新：立刻把新标签 patch 进本地 skills，按钮秒回弹；
+  // 后端写入排队执行，连续点击只在最后一次 refresh 一次。
+  const handleAddSimpleTag = (skill: ManagedSkill, name: string) => {
     const trimmed = name.trim();
     if (!trimmed || skill.tags.includes(trimmed)) return;
-    try {
-      await api.setSkillTags(skill.id, [...skill.tags, trimmed]);
-      await refreshManagedSkills();
-    } catch (error: unknown) {
-      toast.error(getErrorMessage(error, t("common.error")));
-    }
+    const prevTags = skill.tags;
+    const nextTags = [...skill.tags, trimmed];
+    console.log("[handleAddSimpleTag]", skill.id, "prev=", prevTags, "next=", nextTags);
+    patchManagedSkill(skill.id, { tags: nextTags });
+    enqueueWrite(
+      () => api.setSkillTags(skill.id, nextTags),
+      () => patchManagedSkill(skill.id, { tags: prevTags }),
+    );
   };
 
   // Toggle a simple tag: remove if present, add if absent.
-  const handleToggleSimpleTag = async (skill: ManagedSkill, tag: string) => {
-    try {
-      if (skill.tags.includes(tag)) {
-        await api.setSkillTags(skill.id, skill.tags.filter((x) => x !== tag));
-      } else {
-        await api.setSkillTags(skill.id, [...skill.tags, tag]);
-      }
-      await refreshManagedSkills();
-    } catch (error: unknown) {
-      toast.error(getErrorMessage(error, t("common.error")));
-    }
+  const handleToggleSimpleTag = (skill: ManagedSkill, tag: string) => {
+    const prevTags = skill.tags;
+    const willAdd = !skill.tags.includes(tag);
+    const nextTags = willAdd
+      ? [...skill.tags, tag]
+      : skill.tags.filter((x) => x !== tag);
+    console.log("[handleToggleSimpleTag]", skill.id, "tag=", tag, "willAdd=", willAdd, "prev=", prevTags, "next=", nextTags);
+    patchManagedSkill(skill.id, { tags: nextTags });
+    enqueueWrite(
+      () => api.setSkillTags(skill.id, nextTags),
+      () => patchManagedSkill(skill.id, { tags: prevTags }),
+    );
   };
 
-  const handleRemoveTag = async (skill: ManagedSkill, tagToRemove: string) => {
-    try {
-      await api.setSkillTags(skill.id, skill.tags.filter((t) => t !== tagToRemove));
-      toast.success(t("mySkills.tags.tagsUpdated"));
-      await refreshManagedSkills();
-    } catch (error: unknown) {
-      toast.error(getErrorMessage(error, t("common.error")));
-    }
+  const handleRemoveTag = (skill: ManagedSkill, tagToRemove: string) => {
+    const prevTags = skill.tags;
+    const nextTags = skill.tags.filter((t) => t !== tagToRemove);
+    console.log("[handleRemoveTag]", skill.id, "remove=", tagToRemove, "next=", nextTags);
+    patchManagedSkill(skill.id, { tags: nextTags });
+    enqueueWrite(
+      async () => {
+        await api.setSkillTags(skill.id, nextTags);
+        toast.success(t("mySkills.tags.tagsUpdated"));
+      },
+      () => patchManagedSkill(skill.id, { tags: prevTags }),
+    );
   };
 
   // Toggle a smart tag binding: unbind if bound, bind if not.
-  const handleToggleSmartTag = async (skill: ManagedSkill, smartTagId: string) => {
-    try {
-      const existing = smartTagsMap[skill.id] ?? [];
-      if (existing.includes(smartTagId)) {
-        await api.bindSmartTagsToSkill(skill.id, existing.filter((x) => x !== smartTagId));
-      } else {
-        await api.bindSmartTagsToSkill(skill.id, [...existing, smartTagId]);
-      }
-      await refreshSmartTags();
-    } catch (error: unknown) {
-      toast.error(getErrorMessage(error, t("common.error")));
-    }
+  const handleToggleSmartTag = (skill: ManagedSkill, smartTagId: string) => {
+    const existing = smartTagsMap[skill.id] ?? [];
+    const willBind = !existing.includes(smartTagId);
+    const prevIds = existing;
+    const nextIds = willBind
+      ? [...existing, smartTagId]
+      : existing.filter((x) => x !== smartTagId);
+    console.log("[handleToggleSmartTag]", skill.id, "smartTagId=", smartTagId, "willBind=", willBind, "prev=", prevIds, "next=", nextIds);
+    // 乐观更新 smartTagsMap（局部 state，本组件内）
+    setSmartTagsMap((prev) => ({ ...prev, [skill.id]: nextIds }));
+    enqueueWrite(
+      () => api.bindSmartTagsToSkill(skill.id, nextIds),
+      () => setSmartTagsMap((prev) => ({ ...prev, [skill.id]: prevIds })),
+    );
   };
 
   // Replace `oldTag` with `newTag` in the active filter set so the current
@@ -1156,7 +1224,7 @@ export function MySkills() {
     switch (type) {
       case "git":
       case "skillssh":
-        return <Github className="h-3 w-3" />;
+        return <GitFork className="h-3 w-3" />;
       case "local":
       case "import":
         return <HardDrive className="h-3 w-3" />;
@@ -1621,12 +1689,14 @@ export function MySkills() {
                       {getSkillSmartTags(skill).map((tag) => (
                         <span
                           key={tag.id}
-                          className="inline-flex items-center gap-0.5 rounded-full border border-accent/30 bg-accent/10 px-2 py-0.5 text-[11px] font-medium text-accent"
+                          className="group/tag inline-flex items-center gap-0.5 rounded-full border border-accent/30 bg-accent/10 px-2 py-0.5 text-[11px] font-medium text-accent"
                         >
                           {tag.name}
                           <button
                             onClick={(e) => { e.stopPropagation(); handleToggleSmartTag(skill, tag.id); }}
-                            className="hidden group-hover/tag:inline-flex rounded-full p-0 opacity-60 hover:opacity-100 hover:bg-red-500/10 hover:text-red-500"
+                            aria-label={`${t("mySkills.tags.removeTag")}: ${tag.name}`}
+                            title={`${t("mySkills.tags.removeTag")}: ${tag.name}`}
+                            className="hidden rounded-full p-0 opacity-60 hover:bg-red-500/10 hover:text-red-500 hover:opacity-100 group-hover/tag:inline-flex group-focus-within/tag:inline-flex focus:inline-flex"
                           >
                             <X className="h-2.5 w-2.5" />
                           </button>
@@ -1643,7 +1713,9 @@ export function MySkills() {
                           {tag}
                           <button
                             onClick={(e) => { e.stopPropagation(); handleRemoveTag(skill, tag); }}
-                            className="hidden group-hover/tag:inline-flex rounded-full p-0 opacity-60 hover:opacity-100"
+                            aria-label={`${t("mySkills.tags.removeTag")}: ${tag}`}
+                            title={`${t("mySkills.tags.removeTag")}: ${tag}`}
+                            className="hidden rounded-full p-0 opacity-60 hover:opacity-100 group-hover/tag:inline-flex group-focus-within/tag:inline-flex focus:inline-flex"
                           >
                             <X className="h-2.5 w-2.5" />
                           </button>
@@ -1654,11 +1726,12 @@ export function MySkills() {
                           e.stopPropagation();
                           setTagDialogSkillId(skill.id);
                         }}
-                        className="inline-flex items-center rounded-full border border-dashed border-border-subtle p-0.5 text-faint transition-all duration-150 hover:border-accent hover:text-accent-light"
+                        className="inline-flex items-center gap-0.5 rounded-md border border-dashed border-accent/40 bg-accent/10 px-1.5 py-0.5 text-[11px] font-medium text-accent transition-all duration-150 hover:scale-[1.05] hover:border-accent hover:bg-accent/20 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
                         title={t("mySkills.tags.addTag")}
                         aria-label={t("mySkills.tags.addTag")}
                       >
                         <Plus className="h-3 w-3" />
+                        {t("mySkills.tags.addTagShort")}
                       </button>
                     </div>
                   </div>
@@ -1771,11 +1844,12 @@ export function MySkills() {
                       e.stopPropagation();
                       setTagDialogSkillId(skill.id);
                     }}
-                    className="inline-flex items-center rounded-full border border-dashed border-border-subtle p-0.5 text-faint transition-all duration-150 hover:border-accent hover:text-accent-light"
+                    className="inline-flex items-center gap-0.5 rounded-md border border-dashed border-accent/40 bg-accent/10 px-1.5 py-0.5 text-[11px] font-medium text-accent transition-all duration-150 hover:scale-[1.05] hover:border-accent hover:bg-accent/20 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
                     title={t("mySkills.tags.addTag")}
                     aria-label={t("mySkills.tags.addTag")}
                   >
                     <Plus className="h-3 w-3" />
+                    {t("mySkills.tags.addTagShort")}
                   </button>
                 </div>
 
@@ -1966,7 +2040,7 @@ export function MySkills() {
       />
       <SkillsListDialog
         open={skillsListOpen}
-        skills={filtered}
+        skills={skills}
         smartTags={smartTags}
         onClose={() => setSkillsListOpen(false)}
       />

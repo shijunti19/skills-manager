@@ -902,6 +902,8 @@ export interface StripDescriptionsResult {
   stripped: number;
   /** Skills with no description to remove. */
   skipped: number;
+  /** Skills that failed to process (check logs for details). */
+  failed: number;
   /** Total skill directories scanned. */
   total: number;
 }

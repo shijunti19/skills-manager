@@ -206,8 +206,16 @@ fn collect_tray_menu_data(store: &core::skill_store::SkillStore) -> TrayMenuData
 }
 
 fn format_status_line(data: &TrayMenuData) -> String {
-    let skill_label = if data.total_skills == 1 { "skill" } else { "skills" };
-    let agent_label = if data.coding_agent_count == 1 { "agent" } else { "agents" };
+    let skill_label = if data.total_skills == 1 {
+        "skill"
+    } else {
+        "skills"
+    };
+    let agent_label = if data.coding_agent_count == 1 {
+        "agent"
+    } else {
+        "agents"
+    };
     format!(
         "{} {} · {} {} connected",
         data.total_skills, skill_label, data.coding_agent_count, agent_label
@@ -241,7 +249,11 @@ fn preset_menu_item_id(preset: &TrayPresetEntry) -> (String, &'static str) {
 }
 
 fn preset_menu_label(preset: &TrayPresetEntry) -> String {
-    let unit = if preset.skill_count == 1 { "skill" } else { "skills" };
+    let unit = if preset.skill_count == 1 {
+        "skill"
+    } else {
+        "skills"
+    };
     match preset.status() {
         TrayPresetStatus::Active => format!("✓ {} ({} {unit})", preset.name, preset.skill_count),
         TrayPresetStatus::Partial => format!(
@@ -561,7 +573,9 @@ fn check_updates_from_tray<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
                 {
                     Ok(lock) => lock,
                     Err(err) => {
-                        log::warn!("Tray update check: failed to acquire repo lock for {skill_id}: {err}");
+                        log::warn!(
+                            "Tray update check: failed to acquire repo lock for {skill_id}: {err}"
+                        );
                         continue;
                     }
                 };
@@ -624,7 +638,8 @@ fn open_skills_folder_from_tray<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
 
         let status = cmd.arg(&repo_path).status();
         match status {
-            Ok(_status) => {
+            Ok(_status) =>
+            {
                 #[cfg(not(target_os = "windows"))]
                 if !_status.success() {
                     log::warn!(
@@ -785,8 +800,8 @@ pub fn run() {
     // spawn_blocking in `setup` below. Previously this called `initialize_store`
     // synchronously, which blocked the window for 40-100s on `reindex_from_metadata`
     // and stalled the frontend's i18n IPC for ~38s (long white screen).
-    let store = core::app_state::initialize_store_minimal()
-        .expect("Failed to initialize app state");
+    let store =
+        core::app_state::initialize_store_minimal().expect("Failed to initialize app state");
     let pre_builder_ms = pre_builder_start.elapsed().as_millis();
     let store_for_setup = store.clone();
 
@@ -922,6 +937,20 @@ pub fn run() {
                         }
                         log::debug!(
                             "startup: background reindex skipped (no sync metadata) in {} ms",
+                            step.elapsed().as_millis()
+                        );
+                    }
+                    core::app_state::ReindexOutcome::Failed => {
+                        for line in core::app_state::take_early_progress() {
+                            log::warn!("{line}");
+                        }
+                        // Intentionally NOT emitting app-files-changed: the
+                        // reindex left the DB in an unknown state, so a refresh
+                        // would push stale/partial data as if it were a real
+                        // update. The user keeps last session's data until the
+                        // next successful launch.
+                        log::error!(
+                            "startup: background reindex FAILED in {} ms — not emitting refresh",
                             step.elapsed().as_millis()
                         );
                     }

@@ -24,6 +24,8 @@ interface AppState {
   refreshPresets: () => Promise<void>;
   refreshTools: () => Promise<void>;
   refreshManagedSkills: () => Promise<void>;
+  /** 局部乐观更新单个 skill（不重拉），用于标签切换等高频写入场景，避免整页重渲染卡顿 */
+  patchManagedSkill: (skillId: string, patch: Partial<ManagedSkill>) => void;
   refreshProjects: () => Promise<void>;
   setViewedPresetId: (id: string) => void;
   applyPresetToDefault: (id: string) => Promise<void>;
@@ -133,6 +135,18 @@ export function AppProvider({ children }: { children: ReactNode }) {
     // Managed skill changes affect project sync health badges
     refreshProjects();
   }, [setTranslatedError, refreshProjects]);
+
+  // 局部乐观更新：直接改单个 skill 的字段，不重拉整列表。
+  // 用于标签切换这种「点一下要 await 后端 + refresh 全量」的场景，
+  // 否则 MySkills（2000 行）会在每次切换时卡住，连点丢失。
+  const patchManagedSkill = useCallback(
+    (skillId: string, patch: Partial<ManagedSkill>) => {
+      setManagedSkills((prev) =>
+        prev.map((s) => (s.id === skillId ? { ...s, ...patch } : s)),
+      );
+    },
+    [],
+  );
 
   const refreshAppData = useCallback(async () => {
     setLoading(true);
@@ -380,6 +394,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
         refreshPresets,
         refreshTools,
         refreshManagedSkills,
+        patchManagedSkill,
         refreshProjects,
         setViewedPresetId,
         applyPresetToDefault: handleApplyPresetToDefault,

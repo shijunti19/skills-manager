@@ -6,8 +6,7 @@ use std::time::Instant;
 use super::{
     error::AppError,
     skill_store::{ScenarioRecord, SkillStore, SkillTargetRecord},
-    sync_engine, tool_adapters,
-    tool_service,
+    sync_engine, tool_adapters, tool_service,
 };
 
 #[derive(Debug, Clone)]
@@ -82,7 +81,8 @@ pub fn collect_scenario_sync_targets(
     for skill in &skills {
         let source = PathBuf::from(&skill.central_path);
         let target_name = sync_engine::target_dir_name(&source, &skill.name);
-        let adapters = enabled_installed_adapters_for_scenario_skill(store, scenario_id, &skill.id)?;
+        let adapters =
+            enabled_installed_adapters_for_scenario_skill(store, scenario_id, &skill.id)?;
         for adapter in &adapters {
             let target = adapter.skills_dir().join(&target_name);
             let mode = sync_engine::sync_mode_for_tool(&adapter.key, configured_mode.as_deref());
@@ -134,7 +134,10 @@ pub fn preview_scenario_sync(
 /// The reverse direction (existing `"symlink"`, desired `Copy`) returns
 /// `None` because the user actively changed the `sync_mode` setting and
 /// the on-disk symlink doesn't reflect that intent.
-fn skip_check_mode(existing_mode: &str, desired: sync_engine::SyncMode) -> Option<sync_engine::SyncMode> {
+fn skip_check_mode(
+    existing_mode: &str,
+    desired: sync_engine::SyncMode,
+) -> Option<sync_engine::SyncMode> {
     match (existing_mode, desired) {
         ("symlink", sync_engine::SyncMode::Symlink) => Some(sync_engine::SyncMode::Symlink),
         ("copy", sync_engine::SyncMode::Copy) => Some(sync_engine::SyncMode::Copy),
@@ -347,7 +350,9 @@ pub fn apply_scenario_to_default(store: &SkillStore, scenario_id: &str) -> Resul
         }
     }
 
-    store.set_active_scenario(scenario_id).map_err(AppError::db)?;
+    store
+        .set_active_scenario(scenario_id)
+        .map_err(AppError::db)?;
     sync_desired_targets(store, &desired_targets)
 }
 
@@ -358,7 +363,8 @@ pub fn sync_skill_to_active_scenario(
 ) -> Result<(), AppError> {
     if let Ok(Some(active_id)) = store.get_active_scenario_id() {
         if active_id == scenario_id {
-            let adapters = enabled_installed_adapters_for_scenario_skill(store, scenario_id, skill_id)?;
+            let adapters =
+                enabled_installed_adapters_for_scenario_skill(store, scenario_id, skill_id)?;
             let configured_mode = store.get_setting("sync_mode").map_err(AppError::db)?;
             let Ok(Some(skill)) = store.get_skill_by_id(skill_id) else {
                 return Ok(());
@@ -378,7 +384,8 @@ pub fn sync_skill_to_active_scenario(
                 }
 
                 let target = adapter.skills_dir().join(&target_name);
-                let mode = sync_engine::sync_mode_for_tool(&adapter.key, configured_mode.as_deref());
+                let mode =
+                    sync_engine::sync_mode_for_tool(&adapter.key, configured_mode.as_deref());
                 match sync_engine::sync_skill(&source, &target, mode) {
                     Ok(actual_mode) => {
                         let now = chrono::Utc::now().timestamp_millis();
@@ -423,7 +430,9 @@ pub fn ensure_default_startup_scenario(store: &SkillStore) -> Result<(), AppErro
             created_at: now,
             updated_at: now,
         };
-        store.insert_scenario(&default_scenario).map_err(AppError::db)?;
+        store
+            .insert_scenario(&default_scenario)
+            .map_err(AppError::db)?;
         scenarios.push(default_scenario);
     }
 
@@ -464,7 +473,9 @@ pub fn ensure_cli_scenario_state(store: &SkillStore) -> Result<(), AppError> {
             created_at: now,
             updated_at: now,
         };
-        store.insert_scenario(&default_scenario).map_err(AppError::db)?;
+        store
+            .insert_scenario(&default_scenario)
+            .map_err(AppError::db)?;
         scenarios.push(default_scenario);
     }
 
@@ -505,7 +516,8 @@ pub fn sync_active_scenario_to_tool(store: &SkillStore, tool_key: &str) {
             return;
         };
         for skill_id in skill_ids {
-            if let Ok(adapters) = enabled_installed_adapters_for_scenario_skill(store, &active_id, &skill_id)
+            if let Ok(adapters) =
+                enabled_installed_adapters_for_scenario_skill(store, &active_id, &skill_id)
             {
                 if adapters.iter().any(|adapter| adapter.key == tool_key) {
                     let _ = sync_skill_to_active_scenario(store, &active_id, &skill_id);
@@ -565,6 +577,120 @@ pub fn sync_single_skill_to_tool(
 
     store.insert_target(&target_record).map_err(AppError::db)?;
     Ok(())
+}
+
+/// Batch variant of [`sync_single_skill_to_tool`]: sync a set of skills to the
+/// same tool in one pass, amortizing the per-call work that used to be
+/// repeated N times in `organize_agent_skills_core`'s Phase 2 loop —
+/// adapter resolution, disabled-tool check, `sync_mode` lookup, and the
+/// `skills` row SELECT are each done **once**, then the file-sync +
+/// `insert_target` inner loop runs over the pre-fetched skill records.
+///
+/// Returns `(synced, failed)` so callers can report partial success without
+/// aborting the whole batch when one skill's source is missing or its
+/// `sync_skill` errors.
+///
+/// Skill ids not present in the DB are counted as failed and warned, but
+/// don't abort the batch — same resilience as the prior per-skill loop,
+/// which `log::warn!`-ed and continued.
+pub fn sync_skills_to_tool(
+    store: &SkillStore,
+    skill_ids: &[String],
+    tool: &str,
+) -> Result<BatchSyncStats, AppError> {
+    if skill_ids.is_empty() {
+        return Ok(BatchSyncStats::default());
+    }
+
+    // Resolve adapter + disabled check once, not per-skill.
+    let adapter = tool_adapters::find_adapter_with_store(store, tool)
+        .ok_or_else(|| AppError::not_found(format!("Unknown tool: {}", tool)))?;
+    if !adapter.is_installed() {
+        return Err(AppError::not_found(format!(
+            "{} is not installed",
+            adapter.display_name
+        )));
+    }
+    if tool_service::get_disabled_tools(store).contains(&tool.to_string()) {
+        return Err(AppError::invalid_input(format!(
+            "{} is disabled",
+            adapter.display_name
+        )));
+    }
+
+    // Read sync_mode once — the old per-skill path re-queried settings N times.
+    let configured_mode = store.get_setting("sync_mode").map_err(AppError::db)?;
+    let mode = sync_engine::sync_mode_for_tool(tool, configured_mode.as_deref());
+
+    // Bulk-load all skill rows in one SELECT (was N selects).
+    let skills = store
+        .get_skills_by_ids(skill_ids)
+        .map_err(AppError::db)?;
+    // Index by id so we can walk the caller's order while looking up rows,
+    // and detect missing ids (counted as failed, not fatal).
+    let mut by_id: HashMap<&str, &crate::core::skill_store::SkillRecord> = HashMap::new();
+    for skill in &skills {
+        by_id.insert(skill.id.as_str(), skill);
+    }
+
+    let skills_dir = adapter.skills_dir();
+    let mut synced = 0usize;
+    let mut failed = 0usize;
+    let now = chrono::Utc::now().timestamp_millis();
+
+    for skill_id in skill_ids {
+        let Some(skill) = by_id.get(skill_id.as_str()) else {
+            log::warn!("sync_skills_to_tool: skill {skill_id} not found");
+            failed += 1;
+            continue;
+        };
+        let source = PathBuf::from(&skill.central_path);
+        let target = skills_dir.join(sync_engine::target_dir_name(&source, &skill.name));
+        match sync_engine::sync_skill(&source, &target, mode) {
+            Ok(actual_mode) => {
+                let target_record = SkillTargetRecord {
+                    id: uuid::Uuid::new_v4().to_string(),
+                    skill_id: skill_id.clone(),
+                    tool: tool.to_string(),
+                    target_path: target.to_string_lossy().to_string(),
+                    mode: actual_mode.as_str().to_string(),
+                    status: "ok".to_string(),
+                    synced_at: Some(now),
+                    last_error: None,
+                    source_hash: skill.content_hash.clone(),
+                };
+                if let Err(e) = store.insert_target(&target_record) {
+                    log::warn!(
+                        "sync_skills_to_tool: failed to insert target for skill {skill_id}: {e}"
+                    );
+                    failed += 1;
+                } else {
+                    synced += 1;
+                }
+            }
+            Err(e) => {
+                failed += 1;
+                log::warn!(
+                    "sync_skills_to_tool: failed to sync skill {skill_id} ({}) to {}: {e}",
+                    skill.name,
+                    tool
+                );
+            }
+        }
+    }
+
+    log::info!(
+        "sync_skills_to_tool: tool={tool} requested={} synced={synced} failed={failed}",
+        skill_ids.len()
+    );
+    Ok(BatchSyncStats { synced, failed })
+}
+
+/// Per-batch counters returned by [`sync_skills_to_tool`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct BatchSyncStats {
+    pub synced: usize,
+    pub failed: usize,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -929,7 +1055,10 @@ mod sync_desired_targets_tests {
         sync_desired_targets(&store, &desired).unwrap();
 
         // Sync must have run — target should now exist with the source content.
-        assert!(target.join("SKILL.md").exists(), "missing target was not re-synced");
+        assert!(
+            target.join("SKILL.md").exists(),
+            "missing target was not re-synced"
+        );
 
         central_repo::set_test_base_dir_override(None);
     }

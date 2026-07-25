@@ -3,7 +3,7 @@ import {
   Folder,
   ChevronDown,
   ChevronUp,
-  GitFork as Github,
+  GitFork,
   HardDrive,
   Globe,
 } from "lucide-react";
@@ -186,7 +186,7 @@ function SkillDetailPanelContent({
     switch (type) {
       case "git":
       case "skillssh":
-        return <Github className="h-3.5 w-3.5" />;
+        return <GitFork className="h-3.5 w-3.5" />;
       case "local":
       case "import":
         return <HardDrive className="h-3.5 w-3.5" />;

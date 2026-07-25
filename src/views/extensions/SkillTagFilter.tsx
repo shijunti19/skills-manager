@@ -129,13 +129,26 @@ export function SkillTagFilter({
     try {
       const result = await api.stripAgentSkillDescriptions(agentKey);
       await onRefresh();
-      toast.success(
-        t("promptPreview.stripDone", {
-          agent: agent?.display_name ?? agentKey,
-          stripped: result.stripped,
-          skipped: result.skipped,
-        }),
-      );
+      // When some skills failed to process, warn the user instead of claiming
+      // full success — the failed count was previously dropped silently.
+      if (result.failed > 0) {
+        toast.warning(
+          t("promptPreview.stripPartial", {
+            agent: agent?.display_name ?? agentKey,
+            stripped: result.stripped,
+            skipped: result.skipped,
+            failed: result.failed,
+          }),
+        );
+      } else {
+        toast.success(
+          t("promptPreview.stripDone", {
+            agent: agent?.display_name ?? agentKey,
+            stripped: result.stripped,
+            skipped: result.skipped,
+          }),
+        );
+      }
     } catch (err) {
       // Backend returns a concrete reason (e.g. "must be copy mode",
       // "found N symlinks: ..."); surface it directly when available.

@@ -212,6 +212,26 @@ fn symlink_points_to(target: &Path, source: &Path) -> bool {
     }
 }
 
+pub fn is_link_or_junction(path: &Path) -> bool {
+    let Ok(metadata) = std::fs::symlink_metadata(path) else {
+        return false;
+    };
+    if metadata.file_type().is_symlink() {
+        return true;
+    }
+
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+        metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+    }
+    #[cfg(not(windows))]
+    {
+        false
+    }
+}
+
 pub fn remove_target(target: &Path) -> Result<()> {
     let metadata = match std::fs::symlink_metadata(target) {
         Ok(metadata) => metadata,

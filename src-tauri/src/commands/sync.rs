@@ -3,11 +3,8 @@ use std::sync::Arc;
 use tauri::{AppHandle, State};
 
 use crate::core::{
-    error::AppError,
-    scenario_service,
-    skill_store::SkillStore,
-    sync_engine, sync_metadata, tool_adapters,
-    tool_service,
+    error::AppError, scenario_service, skill_store::SkillStore, sync_engine, sync_metadata,
+    tool_adapters, tool_service,
 };
 use serde::Serialize;
 
@@ -306,6 +303,14 @@ pub struct OrganizeResultDto {
 /// This is the "organize agent folder" primitive behind the tag-filter
 /// "sync all" button — it makes the agent's folder mirror a tag's skill set,
 /// so only the needed skills load into the agent's context (saving tokens).
+///
+/// Splits into a pure synchronous `core` (testable, no Tauri handle) and a
+/// thin `#[tauri::command]` wrapper. The core does **not** trust the DB
+/// `skill_targets` table to know what's on disk — it re-reads the agent's
+/// skills directory fresh, because skills installed outside the manager
+/// (or with stale DB rows) would otherwise survive the cleanup. The DB is
+/// only used to find which skills belong to the keep set and to record the
+/// freshly re-synced targets at the end.
 #[tauri::command]
 pub async fn organize_agent_skills(
     app: AppHandle,
@@ -314,67 +319,160 @@ pub async fn organize_agent_skills(
     store: State<'_, Arc<SkillStore>>,
 ) -> Result<OrganizeResultDto, AppError> {
     let store = store.inner().clone();
-    let result = tauri::async_runtime::spawn_blocking(move || -> Result<OrganizeResultDto, AppError> {
-        // Resolve the adapter (must be installed + enabled).
-        let adapter = tool_adapters::find_adapter_with_store(&store, &agent_key)
-            .ok_or_else(|| AppError::not_found(format!("Unknown tool: {}", agent_key)))?;
-        if !adapter.is_installed() {
-            return Err(AppError::not_found(format!(
-                "{} is not installed",
-                adapter.display_name
-            )));
-        }
-        if tool_service::get_disabled_tools(&store).contains(&agent_key) {
-            return Err(AppError::invalid_input(format!(
-                "{} is disabled",
-                adapter.display_name
-            )));
-        }
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        organize_agent_skills_core(&store, &agent_key, &keep_skill_ids)
+    })
+    .await?;
+    if result.is_ok() {
+        schedule_tray_refresh(&app);
+    }
+    result
+}
 
-        let keep_set: std::collections::HashSet<&str> =
-            keep_skill_ids.iter().map(String::as_str).collect();
+/// Filesystem-truth implementation of "make this agent's skills dir contain
+/// exactly `keep_skill_ids`". Two phases:
+///
+/// **Phase 1 — wipe the agent's skills directory.** Read every entry on disk
+/// (not the DB) and clear it:
+///   - symlink/junction → just unlink (central holds the source)
+///   - real dir **not** present in central → copy it into central first, so a
+///     skill that only lives in the agent folder isn't lost, then delete
+///   - real dir already in central → just delete
+///
+///   Hidden entries (`.git`, `.DS_Store`) and stray files are left alone.
+///
+/// **Phase 2 — re-materialize the keep set from central**, honoring
+/// `sync_mode` (with the Windows symlink → junction → copy fallback). DB
+/// `skill_targets` rows for this agent are dropped first, then re-inserted by
+/// each successful Phase 2 sync, so they always reflect the final disk state.
+pub fn organize_agent_skills_core(
+    store: &SkillStore,
+    agent_key: &str,
+    keep_skill_ids: &[String],
+) -> Result<OrganizeResultDto, AppError> {
+    // Resolve the adapter (must be installed + enabled).
+    let adapter = tool_adapters::find_adapter_with_store(store, agent_key)
+        .ok_or_else(|| AppError::not_found(format!("Unknown tool: {}", agent_key)))?;
+    if !adapter.is_installed() {
+        return Err(AppError::not_found(format!(
+            "{} is not installed",
+            adapter.display_name
+        )));
+    }
+    if tool_service::get_disabled_tools(store).contains(&agent_key.to_string()) {
+        return Err(AppError::invalid_input(format!(
+            "{} is disabled",
+            adapter.display_name
+        )));
+    }
 
-        // Phase 1: remove synced skills for this agent that aren't in the keep set.
-        let mut removed = 0usize;
-        let existing_targets: Vec<(String, String)> = store
-            .get_all_targets()
-            .map_err(AppError::db)?
-            .into_iter()
-            .filter(|t| t.tool == agent_key)
-            .map(|t| (t.skill_id, t.target_path))
-            .collect();
-        for (skill_id, target_path) in &existing_targets {
-            if !keep_set.contains(skill_id.as_str()) {
-                // Best-effort file removal; always clean the DB record.
-                let _ = sync_engine::remove_target(&PathBuf::from(target_path));
-                store.delete_target(skill_id, &agent_key).map_err(AppError::db)?;
-                removed += 1;
+    // Directory names the keep-set skills will occupy, so Phase 1 can tell
+    // "cleared because you didn't select it" apart from "cleared then
+    // re-synced" for an accurate `removed` count.
+    //
+    // Bulk-fetched in one SELECT via `get_skills_by_ids` — the prior
+    // per-id `get_skill_by_id` loop was the main hot spot of "sync all",
+    // turning N db round-trips + lock acquisitions into one. We tolerate
+    // missing ids here (they'll show up as failed in Phase 2) instead of
+    // erroring the whole batch, matching the resilience of the inner
+    // Phase 2 loop.
+    let keep_skills = store
+        .get_skills_by_ids(keep_skill_ids)
+        .map_err(AppError::db)?;
+    let keep_dir_names: std::collections::HashSet<String> = keep_skills
+        .iter()
+        .map(|skill| {
+            sync_engine::target_dir_name(
+                std::path::Path::new(&skill.central_path),
+                &skill.name,
+            )
+        })
+        .collect();
+
+    let skills_root = adapter.skills_dir();
+    let central_root = crate::core::central_repo::skills_dir();
+
+    // Phase 1: filesystem-truth cleanup. Re-read the agent's skills dir
+    // fresh from disk — DB targets can be stale or miss skills installed
+    // outside the manager, which is why unselected skills used to survive —
+    // and clear every skill directory:
+    //   - symlink/junction        -> just unlink (central holds the source)
+    //   - real dir missing central -> back it up into central first, so a
+    //     skill that only lives in the agent folder isn't lost, then delete
+    //   - real dir already central -> just delete
+    // Whatever is in the keep set gets re-materialized in Phase 2.
+    let mut removed = 0usize;
+    if let Ok(entries) = std::fs::read_dir(&skills_root) {
+        for entry in entries.filter_map(|e| e.ok()) {
+            let path = entry.path();
+            let Some(name) = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .map(str::to_string)
+            else {
+                continue;
+            };
+            // Leave hidden/metadata entries (e.g. ".git") untouched.
+            if name.starts_with('.') {
+                continue;
             }
-        }
-
-        // Phase 2: sync any keep-set skills that aren't yet present.
-        let existing_ids: std::collections::HashSet<String> =
-            existing_targets.iter().map(|(id, _)| id.clone()).collect();
-        let mut kept = existing_targets.len() - removed;
-        for skill_id in &keep_skill_ids {
-            if !existing_ids.contains(skill_id) {
-                // sync_single_skill_to_tool writes the file + DB record,
-                // honoring sync_mode and the Windows symlink->junction->copy fallback.
-                match scenario_service::sync_single_skill_to_tool(&store, skill_id, &agent_key) {
-                    Ok(()) => kept += 1,
-                    Err(e) => {
-                        // A single failing skill shouldn't abort the whole organize.
-                        log::warn!("organize: failed to sync {skill_id} to {agent_key}: {e}");
+            let symlink_meta = match std::fs::symlink_metadata(&path) {
+                Ok(meta) => meta,
+                Err(_) => continue,
+            };
+            let is_link = sync_engine::is_link_or_junction(&path);
+            // Only manage directories and directory links; skip stray files.
+            if !is_link && !symlink_meta.is_dir() {
+                continue;
+            }
+            if !is_link {
+                // Real directory: preserve it in central if central lacks it.
+                let central_candidate = central_root.join(&name);
+                if !central_candidate.exists() {
+                    if let Err(e) = sync_engine::sync_skill(
+                        &path,
+                        &central_candidate,
+                        sync_engine::SyncMode::Copy,
+                    ) {
+                        log::warn!("organize: failed to back up {name} to central: {e}");
+                        // Never remove the only known copy when its rescue failed.
+                        continue;
                     }
                 }
             }
+            if let Err(e) = sync_engine::remove_target(&path) {
+                log::warn!("organize: failed to remove {}: {e}", path.display());
+                continue;
+            }
+            if !keep_dir_names.contains(&name) {
+                removed += 1;
+            }
         }
+    }
 
-        Ok(OrganizeResultDto { kept, removed })
+    // The directory is now empty of managed skills; every target row for
+    // this agent is stale. Drop them all in one DELETE — Phase 2
+    // re-inserts fresh rows. This replaces a per-skill `delete_target`
+    // loop that fired N round-trips + lock acquisitions.
+    store
+        .delete_targets_for_tool(agent_key)
+        .map_err(AppError::db)?;
+
+    // Phase 2: re-sync exactly the keep set from central, honoring sync_mode
+    // (and the Windows symlink->junction->copy fallback).
+    //
+    // Routed through the batch `sync_skills_to_tool` so adapter resolution,
+    // the disabled-tool check, the `sync_mode` setting read, and the skill
+    // row SELECT each happen **once** instead of N times. Individual
+    // failing skills are counted as failed and logged, not fatal — same
+    // semantics as the prior per-skill loop.
+    let stats = scenario_service::sync_skills_to_tool(store, keep_skill_ids, agent_key)?;
+    let kept = stats.synced;
+
+    Ok(OrganizeResultDto {
+        kept,
+        removed,
     })
-    .await?;
-    schedule_tray_refresh(&app);
-    result
 }
 
 #[cfg(test)]
@@ -479,5 +577,253 @@ mod tests {
             fs::read_to_string(target_base.join("skill123-2/unique.txt")).unwrap(),
             "second"
         );
+    }
+
+    /// Reproduce the regression where the tag-filter "sync all to qoder"
+    /// button left unselected skills behind in the agent's skills directory.
+    ///
+    /// Setup mirrors the real failure mode: the agent's directory starts with
+    /// a mix of copied skills (some in the keep set, some not), and the
+    /// central library holds the sources. After organize with keep=[selected],
+    /// the agent dir must contain ONLY the selected skill — the others must
+    /// have been deleted (not left behind).
+    #[test]
+    fn organize_removes_unselected_skills_in_copy_mode() {
+        let _guard = crate::core::central_repo::test_base_dir_lock();
+        let tmp = tempdir().unwrap();
+        let central_base = tmp.path().join("central");
+        let agent_base = tmp.path().join("agent-skills");
+        fs::create_dir_all(&agent_base).unwrap();
+
+        // Point central_repo::skills_dir() at <tmp>/central so the core sees
+        // a library root it can both read from and back up into.
+        crate::core::central_repo::set_test_base_dir_override(Some(central_base.clone()));
+        let central_skills = crate::core::central_repo::skills_dir();
+        fs::create_dir_all(&central_skills).unwrap();
+
+        let store = SkillStore::new(&tmp.path().join("test.db")).unwrap();
+        configure_single_custom_tool(&store, &agent_base);
+
+        // Three skills in central; the agent dir starts with all three copied
+        // (mirrors a real .qoder/skills that accumulated skills over time).
+        let selected_dir = write_skill_dir(&central_skills, "selected-keep", "keep");
+        let stray1_dir = write_skill_dir(&central_skills, "stray-one", "s1");
+        let stray2_dir = write_skill_dir(&central_skills, "stray-two", "s2");
+        store
+            .insert_skill(&sample_skill("keep", "selected-keep", &selected_dir))
+            .unwrap();
+        store
+            .insert_skill(&sample_skill("s1", "stray-one", &stray1_dir))
+            .unwrap();
+        store
+            .insert_skill(&sample_skill("s2", "stray-two", &stray2_dir))
+            .unwrap();
+
+        // Pre-populate the agent dir with all three (copy mode), so two of
+        // them are unselected "residual" directories organize must remove.
+        sync_skill_to_tool_internal(&store, "keep", "test_agent").unwrap();
+        sync_skill_to_tool_internal(&store, "s1", "test_agent").unwrap();
+        sync_skill_to_tool_internal(&store, "s2", "test_agent").unwrap();
+        assert!(agent_base.join("selected-keep/SKILL.md").exists());
+        assert!(agent_base.join("stray-one/SKILL.md").exists());
+        assert!(agent_base.join("stray-two/SKILL.md").exists());
+
+        // Organize: keep only "keep". The two strays must be cleared.
+        let result =
+            organize_agent_skills_core(&store, "test_agent", &["keep".to_string()]).unwrap();
+
+        assert_eq!(result.kept, 1);
+        assert_eq!(result.removed, 2);
+        // THE REGRESSION ASSERTION: unselected skills must be gone.
+        assert!(
+            agent_base.join("selected-keep/SKILL.md").exists(),
+            "kept skill should still be installed"
+        );
+        assert!(
+            !agent_base.join("stray-one").exists(),
+            "unselected stray-one must be removed (regression)"
+        );
+        assert!(
+            !agent_base.join("stray-two").exists(),
+            "unselected stray-two must be removed (regression)"
+        );
+    }
+
+    /// A skill directory that exists ONLY in the agent folder (no central
+    /// source) must be backed up into central before being deleted, so the
+    /// user doesn't lose a skill the manager didn't import. This is the
+    /// "central 不存在就复制过去" branch of Phase 1.
+    #[test]
+    fn organize_backs_up_orphan_skill_to_central_before_removing() {
+        let _guard = crate::core::central_repo::test_base_dir_lock();
+        let tmp = tempdir().unwrap();
+        let central_base = tmp.path().join("central");
+        let agent_base = tmp.path().join("agent-skills");
+        fs::create_dir_all(&agent_base).unwrap();
+        crate::core::central_repo::set_test_base_dir_override(Some(central_base.clone()));
+
+        // central_repo::skills_dir() resolves to <central_base>/skills — that's
+        // where both registered skill sources and Phase-1 backups live.
+        let central_skills = crate::core::central_repo::skills_dir();
+        fs::create_dir_all(&central_skills).unwrap();
+
+        let store = SkillStore::new(&tmp.path().join("test.db")).unwrap();
+        configure_single_custom_tool(&store, &agent_base);
+
+        // One registered skill (the keep target) living under central/skills.
+        let keep_dir = write_skill_dir(&central_skills, "keep-skill", "keep");
+        store
+            .insert_skill(&sample_skill("keep", "keep-skill", &keep_dir))
+            .unwrap();
+        sync_skill_to_tool_internal(&store, "keep", "test_agent").unwrap();
+
+        // The orphan: lives only in the agent dir, central has no "orphan-x".
+        write_skill_dir(&agent_base, "orphan-x", "orphan-data");
+
+        let result =
+            organize_agent_skills_core(&store, "test_agent", &["keep".to_string()]).unwrap();
+
+        assert_eq!(result.kept, 1);
+        assert_eq!(result.removed, 1);
+        // Orphan removed from agent dir...
+        assert!(!agent_base.join("orphan-x").exists());
+        // ...but rescued into central first (data not lost).
+        assert!(
+            central_skills.join("orphan-x/SKILL.md").exists(),
+            "orphan skill must be backed up to central before removal"
+        );
+        assert_eq!(
+            fs::read_to_string(central_skills.join("orphan-x/unique.txt")).unwrap(),
+            "orphan-data"
+        );
+    }
+
+    #[test]
+    fn organize_keeps_orphan_when_backup_fails() {
+        let _guard = crate::core::central_repo::test_base_dir_lock();
+        let tmp = tempdir().unwrap();
+        let central_base = tmp.path().join("central");
+        let agent_base = tmp.path().join("agent-skills");
+        fs::create_dir_all(&agent_base).unwrap();
+        crate::core::central_repo::set_test_base_dir_override(Some(central_base.clone()));
+
+        let central_skills = crate::core::central_repo::skills_dir();
+        fs::create_dir_all(&central_skills).unwrap();
+        let store = SkillStore::new(&tmp.path().join("test.db")).unwrap();
+        configure_single_custom_tool(&store, &agent_base);
+
+        let orphan = write_skill_dir(&agent_base, "orphan-x", "orphan-data");
+        // Force the backup destination to be unusable without touching the
+        // source: a regular file cannot contain central/orphan-x.
+        fs::remove_dir_all(&central_skills).unwrap();
+        fs::write(&central_skills, "blocked").unwrap();
+
+        let result = organize_agent_skills_core(&store, "test_agent", &[]).unwrap();
+
+        assert_eq!(result.removed, 0);
+        assert!(orphan.join("SKILL.md").exists());
+        assert_eq!(
+            fs::read_to_string(orphan.join("unique.txt")).unwrap(),
+            "orphan-data"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn organize_unlinks_junction_without_touching_central_source() {
+        let _guard = crate::core::central_repo::test_base_dir_lock();
+        let tmp = tempdir().unwrap();
+        let central_base = tmp.path().join("central");
+        let agent_base = tmp.path().join("agent-skills");
+        fs::create_dir_all(&agent_base).unwrap();
+        crate::core::central_repo::set_test_base_dir_override(Some(central_base.clone()));
+        let central_skills = crate::core::central_repo::skills_dir();
+        fs::create_dir_all(&central_skills).unwrap();
+
+        let store = SkillStore::new(&tmp.path().join("test.db")).unwrap();
+        configure_single_custom_tool(&store, &agent_base);
+        let source = write_skill_dir(&central_skills, "junction-skill", "central-data");
+        let target = agent_base.join("junction-skill");
+        junction::create(&source, &target).unwrap();
+
+        let result = organize_agent_skills_core(&store, "test_agent", &[]).unwrap();
+
+        assert_eq!(result.removed, 1);
+        assert!(fs::symlink_metadata(&target).is_err());
+        assert_eq!(
+            fs::read_to_string(source.join("unique.txt")).unwrap(),
+            "central-data"
+        );
+    }
+
+    /// Symlink mode: Phase 1 unlinks the symlink (doesn't follow + delete the
+    /// central source), Phase 2 re-creates a fresh symlink. This is the
+    /// "如果是软连接直接删了" branch.
+    #[cfg(unix)]
+    #[test]
+    fn organize_symlink_mode_unlinks_and_recreates_symlink() {
+        use std::os::unix::fs::symlink;
+        let _guard = crate::core::central_repo::test_base_dir_lock();
+        let tmp = tempdir().unwrap();
+        let central_base = tmp.path().join("central");
+        let agent_base = tmp.path().join("agent-skills");
+        fs::create_dir_all(&agent_base).unwrap();
+        crate::core::central_repo::set_test_base_dir_override(Some(central_base.clone()));
+        let central_skills = crate::core::central_repo::skills_dir();
+        fs::create_dir_all(&central_skills).unwrap();
+
+        let store = SkillStore::new(&tmp.path().join("test.db")).unwrap();
+        // Switch to symlink mode for this scenario.
+        let custom_tools = vec![CustomToolDef {
+            key: "test_agent".to_string(),
+            display_name: "Test Agent".to_string(),
+            skills_dir: agent_base.to_string_lossy().to_string(),
+            project_relative_skills_dir: None,
+            category: Default::default(),
+            skills_prompt_spec: None,
+        }];
+        store
+            .set_setting(
+                "custom_tools",
+                &serde_json::to_string(&custom_tools).unwrap(),
+            )
+            .unwrap();
+        let disabled_builtin_tools: Vec<String> = tool_adapters::default_tool_adapters()
+            .into_iter()
+            .map(|adapter| adapter.key)
+            .collect();
+        store
+            .set_setting(
+                "disabled_tools",
+                &serde_json::to_string(&disabled_builtin_tools).unwrap(),
+            )
+            .unwrap();
+        store.set_setting("sync_mode", "symlink").unwrap();
+
+        let keep_dir = write_skill_dir(&central_skills, "keep-sym", "keep");
+        let stray_dir = write_skill_dir(&central_skills, "stray-sym", "stray");
+        store
+            .insert_skill(&sample_skill("keep", "keep-sym", &keep_dir))
+            .unwrap();
+        store
+            .insert_skill(&sample_skill("stray", "stray-sym", &stray_dir))
+            .unwrap();
+
+        // Both start as symlinks in the agent dir.
+        sync_skill_to_tool_internal(&store, "keep", "test_agent").unwrap();
+        sync_skill_to_tool_internal(&store, "stray", "test_agent").unwrap();
+        assert!(agent_base.join("keep-sym").is_symlink());
+        assert!(agent_base.join("stray-sym").is_symlink());
+
+        let result =
+            organize_agent_skills_core(&store, "test_agent", &["keep".to_string()]).unwrap();
+
+        assert_eq!(result.kept, 1);
+        assert_eq!(result.removed, 1);
+        // Stray symlink gone; central source untouched.
+        assert!(!agent_base.join("stray-sym").exists());
+        assert!(central_skills.join("stray-sym/SKILL.md").exists());
+        // Kept one re-materialized as a fresh symlink.
+        assert!(agent_base.join("keep-sym").is_symlink());
     }
 }

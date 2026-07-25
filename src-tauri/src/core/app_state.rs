@@ -209,6 +209,10 @@ pub fn initialize_store_minimal() -> Result<Arc<SkillStore>> {
 pub enum ReindexOutcome {
     /// The reindex ran and may have altered skill rows / tags / scenarios.
     Ran,
+    /// The reindex itself failed. The DB retains its last-known-good state, so
+    /// the caller should NOT emit a refresh — that would push stale/partial
+    /// data to the UI as if a real update happened.
+    Failed,
     /// No sync metadata exists, so there was nothing to reindex.
     SkippedNoMetadata,
 }
@@ -233,7 +237,9 @@ pub fn run_reindex_if_needed(store: &Arc<SkillStore>) -> ReindexOutcome {
     record_early_progress("early-startup: reindex_from_metadata starting");
 
     let step = Instant::now();
-    match sync_metadata::reindex_from_metadata(store).context("Failed to reindex from sync metadata") {
+    match sync_metadata::reindex_from_metadata(store)
+        .context("Failed to reindex from sync metadata")
+    {
         Ok(()) => record_early_progress(format!(
             "early-startup: reindex_from_metadata done in {} ms",
             step.elapsed().as_millis()
@@ -243,7 +249,9 @@ pub fn run_reindex_if_needed(store: &Arc<SkillStore>) -> ReindexOutcome {
                 "early-startup: reindex_from_metadata FAILED in {} ms: {e:#}",
                 step.elapsed().as_millis()
             ));
-            return ReindexOutcome::Ran;
+            // Don't touch the DB further or signal a refresh: the DB is in an
+            // unknown state and the subsequent steps assume a clean reindex.
+            return ReindexOutcome::Failed;
         }
     }
 
@@ -280,9 +288,7 @@ pub fn run_reindex_if_needed(store: &Arc<SkillStore>) -> ReindexOutcome {
             "early-startup: apply_scenario (default_startup) in {} ms",
             step.elapsed().as_millis()
         )),
-        Err(e) => record_early_progress(format!(
-            "early-startup: apply_scenario FAILED: {e:#}"
-        )),
+        Err(e) => record_early_progress(format!("early-startup: apply_scenario FAILED: {e:#}")),
     }
 
     record_early_progress(format!(

@@ -340,7 +340,12 @@ fn migrate_v7_to_v8(conn: &Connection) -> Result<()> {
     // Forward-compat: a pre-existing smart_tags table (from a newer build)
     // may lack `sort_order` and these columns. add_column_if_missing is a
     // no-op when the column already exists.
-    add_column_if_missing(conn, "smart_tags", "sort_order", "INTEGER NOT NULL DEFAULT 0")?;
+    add_column_if_missing(
+        conn,
+        "smart_tags",
+        "sort_order",
+        "INTEGER NOT NULL DEFAULT 0",
+    )?;
     add_column_if_missing(conn, "smart_tags", "description", "TEXT")?;
     add_column_if_missing(conn, "smart_tags", "prompt", "TEXT")?;
     add_column_if_missing(conn, "smart_tags", "agents", "TEXT NOT NULL DEFAULT '[]'")?;
@@ -353,7 +358,12 @@ fn migrate_v7_to_v8(conn: &Connection) -> Result<()> {
 fn run_ensure_passes(conn: &Connection) -> Result<()> {
     // Ensure the smart_tags table family exists with our expected columns.
     if has_table(conn, "smart_tags")? {
-        add_column_if_missing(conn, "smart_tags", "sort_order", "INTEGER NOT NULL DEFAULT 0")?;
+        add_column_if_missing(
+            conn,
+            "smart_tags",
+            "sort_order",
+            "INTEGER NOT NULL DEFAULT 0",
+        )?;
         add_column_if_missing(conn, "smart_tags", "description", "TEXT")?;
         add_column_if_missing(conn, "smart_tags", "prompt", "TEXT")?;
         add_column_if_missing(conn, "smart_tags", "agents", "TEXT NOT NULL DEFAULT '[]'")?;
@@ -399,9 +409,7 @@ fn has_column(conn: &Connection, table: &str, column: &str) -> Result<bool> {
 
 fn has_table(conn: &Connection, table: &str) -> Result<bool> {
     validate_identifier(table)?;
-    let mut stmt = conn.prepare(
-        "SELECT 1 FROM sqlite_master WHERE type='table' AND name = ?1",
-    )?;
+    let mut stmt = conn.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name = ?1")?;
     Ok(stmt.exists(params![table])?)
 }
 
@@ -577,7 +585,7 @@ mod tests {
     }
 
     #[test]
-    fn test_newer_schema_rejected() {
+    fn test_newer_schema_forward_compat() {
         // Forward-compat: a newer-schema DB is NOT hard-rejected — that would
         // lock the user out of their data after a downgrade. The app runs the
         // idempotent "ensure" passes so every column THIS version expects

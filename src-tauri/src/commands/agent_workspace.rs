@@ -13,6 +13,38 @@ use crate::core::{
     sync_engine, tool_adapters, tool_service,
 };
 
+/// Whether `path` is a symbolic link OR a Windows directory junction.
+///
+/// `symlink_metadata().is_symlink()` returns true for real symbolic links but
+/// **false** for junctions on Windows — and the sync engine creates junctions
+/// as its symlink-mode fallback there. Comparing the link's own metadata
+/// against the followed metadata catches both: a reparse point (symlink or
+/// junction) resolves to a different target, so the two canonicalize
+/// differently (or the followed variant points elsewhere). Plain directories
+/// canonicalize identically from either call.
+fn is_link_or_junction(path: &Path) -> bool {
+    // Fast path: a real symbolic link is reported by the link's own metadata.
+    if std::fs::symlink_metadata(path)
+        .map(|m| m.file_type().is_symlink())
+        .unwrap_or(false)
+    {
+        return true;
+    }
+    // Windows junctions aren't `is_symlink()`, but following them (metadata,
+    // which stat's the target) yields a path that differs from the junction's
+    // own location. canonicalize both and compare.
+    let followed = std::fs::canonicalize(path);
+    let link_meta_parent = path.parent().and_then(|p| {
+        std::fs::canonicalize(p)
+            .ok()
+            .and_then(|parent| path.file_name().map(|name| parent.join(name)))
+    });
+    match (followed, link_meta_parent) {
+        (Ok(followed), Some(link_self)) => followed != link_self,
+        _ => false,
+    }
+}
+
 fn target_path_equals_skill(target_path: &str, skill_path: &str) -> bool {
     if target_path == skill_path {
         return true;
@@ -470,10 +502,9 @@ pub fn backfill_stranded_agent_targets(store: &SkillStore) -> usize {
 
         for skill in read_agent_local_skills(adapter) {
             let canonical = std::fs::canonicalize(&skill.path).ok();
-            let Some(matched) = all_managed
-                .iter()
-                .find(|managed| source_ref_matches_skill_path(&skill.path, canonical.as_ref(), managed))
-            else {
+            let Some(matched) = all_managed.iter().find(|managed| {
+                source_ref_matches_skill_path(&skill.path, canonical.as_ref(), managed)
+            }) else {
                 continue;
             };
 
@@ -589,6 +620,9 @@ pub struct StripDescriptionsDto {
     pub stripped: usize,
     /// Number of skills that had no `description` value to clear.
     pub skipped: usize,
+    /// Number of skills that failed to process (logged at warn). Surfaced so
+    /// the UI can tell "all good" from "some silently failed".
+    pub failed: usize,
     /// Total number of skill directories scanned.
     pub total: usize,
 }
@@ -641,14 +675,14 @@ pub async fn strip_agent_skill_descriptions(
         let skills = read_agent_local_skills(&adapter);
         let total = skills.len();
 
-        // Precondition 2: no skill dir may be a symlink/junction.
+        // Precondition 2: no skill dir may be a symlink/junction. On Windows a
+        // directory junction's `is_symlink()` returns false (only true symbolic
+        // links qualify), so we also flag any path whose followed-metadata
+        // differs from its link-metadata — that catches junctions, which the
+        // sync engine creates as the symlink-mode fallback on this platform.
         let symlink_names: Vec<String> = skills
             .iter()
-            .filter(|s| {
-                std::fs::symlink_metadata(&s.path)
-                    .map(|m| m.file_type().is_symlink())
-                    .unwrap_or(false)
-            })
+            .filter(|s| is_link_or_junction(std::path::Path::new(&s.path)))
             .map(|s| s.relative_path.clone())
             .collect();
         if !symlink_names.is_empty() {
@@ -661,21 +695,26 @@ pub async fn strip_agent_skill_descriptions(
         // Execute: strip description from each skill's SKILL.md.
         let mut stripped = 0usize;
         let mut skipped = 0usize;
+        let mut failed = 0usize;
         for skill in &skills {
             match skill_metadata::strip_description_from_skill_dir(std::path::Path::new(&skill.path)) {
                 Ok(skill_metadata::StripOutcome::Stripped) => stripped += 1,
                 Ok(skill_metadata::StripOutcome::NoDescription)
                 | Ok(skill_metadata::StripOutcome::NotASkill) => skipped += 1,
-                Err(e) => log::warn!(
-                    "strip_agent_skill_descriptions: failed to process {}: {e}",
-                    skill.path
-                ),
+                Err(e) => {
+                    failed += 1;
+                    log::warn!(
+                        "strip_agent_skill_descriptions: failed to process {}: {e}",
+                        skill.path
+                    );
+                }
             }
         }
 
         Ok(StripDescriptionsDto {
             stripped,
             skipped,
+            failed,
             total,
         })
     })
@@ -735,9 +774,9 @@ fn delete_agent_local_skill(
     let all_managed = store.get_all_skills().unwrap_or_default();
     let all_targets = store.get_all_targets().unwrap_or_default();
     if let Some(managed) = find_verified_center_match(&skill, &all_managed, &all_targets) {
-        let still_linked = all_targets
-            .iter()
-            .any(|t| t.skill_id == managed.id && target_path_equals_skill(&t.target_path, &skill.path));
+        let still_linked = all_targets.iter().any(|t| {
+            t.skill_id == managed.id && target_path_equals_skill(&t.target_path, &skill.path)
+        });
         if still_linked {
             return Err(AppError::invalid_input(
                 "Skill is managed by Skills Center — remove from the agent first.",
@@ -755,8 +794,8 @@ fn delete_agent_local_skill(
 #[cfg(test)]
 mod tests {
     use super::{
-        backfill_stranded_agent_targets, enrich_center_status,
-        import_agent_local_skill_to_center, update_agent_local_skill_from_center,
+        backfill_stranded_agent_targets, enrich_center_status, import_agent_local_skill_to_center,
+        update_agent_local_skill_from_center,
     };
     use crate::core::content_hash;
     use crate::core::project_scanner::ProjectSkillInfo;

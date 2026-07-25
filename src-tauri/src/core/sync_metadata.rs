@@ -1,4 +1,4 @@
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{anyhow, bail, Context, Result};
 use rusqlite::params;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
@@ -272,14 +272,18 @@ pub(crate) fn reindex_from_metadata_unlocked(store: &SkillStore) -> Result<()> {
     // Skills in the DB but not in metadata → delete.
     for existing in &existing_skills {
         if !metadata_ids.contains(&existing.id) {
-            planned_deletes.push(PlannedDelete { skill_id: existing.id.clone() });
+            planned_deletes.push(PlannedDelete {
+                skill_id: existing.id.clone(),
+            });
         }
     }
 
     for meta in skills {
         let skill_dir = skills_root.join(&meta.path);
         if !skill_dir.is_dir() {
-            planned_deletes.push(PlannedDelete { skill_id: meta.skill_id.clone() });
+            planned_deletes.push(PlannedDelete {
+                skill_id: meta.skill_id.clone(),
+            });
             continue;
         }
 
@@ -800,7 +804,7 @@ mod tests {
     use super::*;
     use crate::core::{central_repo, skill_store::SkillStore};
     use std::sync::MutexGuard;
-    use tempfile::{TempDir, tempdir};
+    use tempfile::{tempdir, TempDir};
 
     struct TestRepo {
         _lock: MutexGuard<'static, ()>,
@@ -931,8 +935,7 @@ mod tests {
 
         let mut record = sample_skill("skill-stable", &skill_dir);
         record.updated_at = 1_000_000;
-        record.content_hash =
-            Some(super::super::content_hash::hash_directory(&skill_dir).unwrap());
+        record.content_hash = Some(super::super::content_hash::hash_directory(&skill_dir).unwrap());
         repo.store.insert_skill(&record).unwrap();
         write_all_from_db_unlocked(&repo.store).unwrap();
 

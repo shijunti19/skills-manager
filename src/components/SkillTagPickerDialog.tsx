@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Check, Search, X } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { cn } from "../utils";
@@ -47,6 +47,72 @@ export function SkillTagPickerDialog({
   const { t } = useTranslation();
   const [search, setSearch] = useState("");
   const [newTagName, setNewTagName] = useState("");
+  const dialogRef = useRef<HTMLDivElement>(null);
+  const searchRef = useRef<HTMLInputElement>(null);
+  const returnFocusRef = useRef<HTMLElement | null>(null);
+  // 保存最新的 onClose 到 ref，避免它作为 effect 依赖时——因为父组件每次渲染
+  // 都传入新的内联函数引用——导致焦点 effect 反复重跑、把焦点强制抢回搜索框。
+  const onCloseRef = useRef(onClose);
+  onCloseRef.current = onClose;
+
+  // Reset the search + new-tag inputs whenever a different skill opens, so a
+  // half-typed search from skill A doesn't bleed into the dialog for skill B.
+  // (Component stays mounted while closed, so state would otherwise persist.)
+  useEffect(() => {
+    if (open) {
+      setSearch("");
+      setNewTagName("");
+    }
+  }, [open, skill?.id]);
+
+  // Keep keyboard focus inside the modal and restore it to the trigger when
+  // the dialog closes. The search box is the most useful initial target.
+  // 依赖只放 [open]：焦点只在「打开/关闭」那一刻各跑一次，不能每次父组件
+  // 重渲染都重跑——否则点击列表项触发状态更新 → onClose 新引用 → effect
+  // 重跑 → setTimeout 把焦点抢回搜索框，按钮点击/Tab 全部失效。
+  useEffect(() => {
+    if (!open) return;
+    returnFocusRef.current = document.activeElement as HTMLElement | null;
+    const focusTimer = window.setTimeout(() => searchRef.current?.focus(), 0);
+
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        e.preventDefault();
+        onCloseRef.current();
+        return;
+      }
+      if (e.key !== "Tab") return;
+
+      const dialog = dialogRef.current;
+      if (!dialog) return;
+      const focusable = Array.from(
+        dialog.querySelectorAll<HTMLElement>(
+          'button:not([disabled]), input:not([disabled]), [href], [tabindex]:not([tabindex="-1"])',
+        ),
+      ).filter((element) => !element.hasAttribute("hidden"));
+      if (focusable.length === 0) {
+        e.preventDefault();
+        dialog.focus();
+        return;
+      }
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      if (e.shiftKey && document.activeElement === first) {
+        e.preventDefault();
+        last.focus();
+      } else if (!e.shiftKey && document.activeElement === last) {
+        e.preventDefault();
+        first.focus();
+      }
+    };
+
+    document.addEventListener("keydown", onKey);
+    return () => {
+      window.clearTimeout(focusTimer);
+      document.removeEventListener("keydown", onKey);
+      returnFocusRef.current?.focus();
+    };
+  }, [open]);
 
   // Bound smart-tag ids for the open skill, as a Set for O(1) lookup.
   const boundSmartTagIds = useMemo(
@@ -76,11 +142,9 @@ export function SkillTagPickerDialog({
   if (!open || !skill) return null;
 
   const handleToggleSimple = (tag: string) => {
-    if (skill.tags.includes(tag)) {
-      onToggleSimpleTag(skill, tag); // remove
-    } else {
-      onToggleSimpleTag(skill, tag); // add
-    }
+    // Toggle semantics (add if absent, remove if present) live in the parent's
+    // onToggleSimpleTag — both branches used to call it identically.
+    onToggleSimpleTag(skill, tag);
   };
 
   const handleCreate = () => {
@@ -91,9 +155,18 @@ export function SkillTagPickerDialog({
   };
 
   return (
-    <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/50 p-4 backdrop-blur-sm">
+    <div
+      className="fixed inset-0 z-[60] flex items-center justify-center bg-black/50 p-4 backdrop-blur-sm"
+      role="dialog"
+      aria-modal="true"
+      aria-label={t("mySkills.tags.pickerTitle")}
+    >
       <div className="absolute inset-0" onClick={onClose} />
-      <div className="relative flex max-h-[85vh] w-full max-w-lg flex-col overflow-hidden rounded-xl border border-border bg-bg-secondary shadow-[0_40px_90px_rgba(0,0,0,0.45)]">
+      <div
+        ref={dialogRef}
+        tabIndex={-1}
+        className="relative flex max-h-[85vh] w-full max-w-lg flex-col overflow-hidden rounded-xl border border-border bg-bg-secondary shadow-[0_40px_90px_rgba(0,0,0,0.45)]"
+      >
         {/* Header */}
         <div className="flex items-center justify-between border-b border-border-subtle px-5 py-4">
           <div className="min-w-0">
@@ -105,8 +178,10 @@ export function SkillTagPickerDialog({
             </p>
           </div>
           <button
+            type="button"
             onClick={onClose}
-            className="rounded-lg border border-border bg-background p-2 text-muted transition hover:border-border-subtle hover:text-secondary"
+            aria-label={t("common.close")}
+            className="rounded-lg border border-border bg-background p-2 text-muted transition hover:border-border-subtle hover:text-secondary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
           >
             <X className="h-4 w-4" />
           </button>
@@ -117,6 +192,7 @@ export function SkillTagPickerDialog({
           <div className="relative">
             <Search className="absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-faint" />
             <input
+              ref={searchRef}
               type="text"
               value={search}
               onChange={(e) => setSearch(e.target.value)}
@@ -208,7 +284,7 @@ export function SkillTagPickerDialog({
                     type="button"
                     onClick={() => handleToggleSimple(tag)}
                     className={cn(
-                      "inline-flex items-center gap-1 rounded-full px-2.5 py-0.5 text-[12px] font-medium transition-colors",
+                      "inline-flex items-center gap-1 rounded-md px-2 py-1 text-[12px] font-medium transition-colors",
                       getTagColor(tag, allSimpleTags),
                       "hover:opacity-80",
                     )}
@@ -228,9 +304,11 @@ export function SkillTagPickerDialog({
                     key={tag}
                     type="button"
                     onClick={() => handleToggleSimple(tag)}
-                    className="inline-flex items-center gap-1 rounded-full border border-dashed border-border-subtle px-2.5 py-0.5 text-[12px] font-medium text-muted transition-colors hover:border-accent hover:text-accent"
+                    className={cn(
+                      "inline-flex items-center rounded-md border border-dashed border-current/30 px-2 py-1 text-[12px] font-medium transition-all hover:scale-[1.04] hover:border-current/60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent",
+                      getTagColor(tag, allSimpleTags),
+                    )}
                   >
-                    <span className="text-faint">+</span>
                     {tag}
                   </button>
                 ))}

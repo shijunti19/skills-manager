@@ -346,6 +346,50 @@ impl SkillStore {
         Ok(rows.next().and_then(|r| r.ok()))
     }
 
+    /// Bulk-fetch skills whose `id` is in `ids`, in a single SELECT using a
+    /// temporary table join — replaces N calls to [`get_skill_by_id`] in batch
+    /// paths like `organize_agent_skills_core`. Missing ids simply aren't in
+    /// the result (no error), mirroring single-id semantics.
+    ///
+    /// Uses the `rust_recurse`-free pattern: SQLite's `IN (...)` expansion
+    /// would cap at 999/32766 host params depending on version, and we hit
+    /// that ceiling with ~1000+ skill tag-filter syncs. The temp-table join
+    /// sidesteps any limit and lets SQLite plan the lookup via index.
+    pub fn get_skills_by_ids(&self, ids: &[String]) -> Result<Vec<SkillRecord>> {
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let conn = self.conn.lock().unwrap();
+        // Drop the temp table if a previous call on this connection left one
+        // (a connection-scoped temp table survives across statements within
+        // the same connection; our `conn` is pooled/reused).
+        conn.execute("DROP TABLE IF EXISTS tmp_skill_ids", [])?;
+        conn.execute(
+            "CREATE TEMP TABLE tmp_skill_ids (id TEXT PRIMARY KEY)",
+            [],
+        )?;
+        let tx = conn.unchecked_transaction()?;
+        {
+            let mut stmt = tx.prepare("INSERT INTO tmp_skill_ids (id) VALUES (?1)")?;
+            for id in ids {
+                stmt.execute(params![id])?;
+            }
+        }
+        tx.commit()?;
+        let mut stmt = conn.prepare(
+            "SELECT s.id, s.name, s.description, s.source_type, s.source_ref, s.source_ref_resolved,
+                    s.source_subpath, s.source_branch, s.source_revision, s.remote_revision,
+                    s.central_path, s.content_hash, s.enabled, s.created_at, s.updated_at, s.status,
+                    s.update_status, s.last_checked_at, s.last_check_error
+             FROM skills s
+             INNER JOIN tmp_skill_ids t ON s.id = t.id",
+        )?;
+        let rows = stmt.query_map([], map_skill_row)?;
+        let out: Vec<SkillRecord> = rows.filter_map(|r| r.ok()).collect();
+        conn.execute("DROP TABLE IF EXISTS tmp_skill_ids", [])?;
+        Ok(out)
+    }
+
     pub fn get_skill_by_central_path(&self, central_path: &str) -> Result<Option<SkillRecord>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
@@ -635,6 +679,19 @@ impl SkillStore {
         Ok(())
     }
 
+    /// Drop every `skill_targets` row for a given tool in one statement.
+    /// Used by `organize_agent_skills_core` instead of looping
+    /// [`delete_target`] over stale rows — a single DELETE WHERE tool = ?1
+    /// replaces N round-trips and lock acquisitions.
+    pub fn delete_targets_for_tool(&self, tool: &str) -> Result<usize> {
+        let conn = self.conn.lock().unwrap();
+        let affected = conn.execute(
+            "DELETE FROM skill_targets WHERE tool = ?1",
+            params![tool],
+        )?;
+        Ok(affected)
+    }
+
     // ── Discovered Skills ──
 
     pub fn clear_discovered(&self) -> Result<()> {
@@ -715,7 +772,12 @@ impl SkillStore {
                 "INSERT OR REPLACE INTO pending_conflicts
                  (skill_id, theirs_commit, theirs_path, detected_at)
                  VALUES (?1, ?2, ?3, ?4)",
-                params![row.skill_id, row.theirs_commit, row.theirs_path, row.detected_at],
+                params![
+                    row.skill_id,
+                    row.theirs_commit,
+                    row.theirs_path,
+                    row.detected_at
+                ],
             )?;
         }
         tx.commit()?;
@@ -1372,7 +1434,11 @@ impl SkillStore {
 
     /// Transaction-scoped variant of [`set_tags_for_skill`], used in the
     /// reindex loop so per-skill tag writes don't each autocommit.
-    pub fn set_tags_for_skill_tx(tx: &Transaction<'_>, skill_id: &str, tags: &[String]) -> Result<()> {
+    pub fn set_tags_for_skill_tx(
+        tx: &Transaction<'_>,
+        skill_id: &str,
+        tags: &[String],
+    ) -> Result<()> {
         tx.execute(
             "DELETE FROM skill_tags WHERE skill_id = ?1",
             params![skill_id],
@@ -1547,12 +1613,12 @@ impl SkillStore {
 
     /// Replace the set of smart tags bound to a skill (full sync semantics):
     /// delete all existing bindings for the skill, then insert the new set.
+    /// `skill_smart_tag_relations` has exactly (skill_id, smart_tag_id) in this
+    /// fork's schema; the previous "try created_at column then fall back"
+    /// dance was for a since-reverted build that no longer exists and masked
+    /// real errors (FK violation, disk full) as "column missing".
     pub fn set_smart_tags_for_skill(&self, skill_id: &str, smart_tag_ids: &[String]) -> Result<()> {
         let conn = self.conn.lock().unwrap();
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs() as i64)
-            .unwrap_or(0);
         let tx = conn.unchecked_transaction()?;
         tx.execute(
             "DELETE FROM skill_smart_tag_relations WHERE skill_id = ?1",
@@ -1561,50 +1627,27 @@ impl SkillStore {
         for tag_id in smart_tag_ids {
             let trimmed = tag_id.trim();
             if !trimmed.is_empty() {
-                // `created_at` is supplied for forward-compat with pre-existing
-                // relation tables that declare it NOT NULL (a newer since-reverted
-                // build did so). This version's fresh schema omits the column, and
-                // INSERT-with-extra-column is rejected there, so try both shapes.
-                let res = tx.execute(
+                tx.execute(
                     "INSERT OR IGNORE INTO skill_smart_tag_relations
-                        (skill_id, smart_tag_id, created_at) VALUES (?1, ?2, ?3)",
-                    params![skill_id, trimmed, now],
-                );
-                if res.is_err() {
-                    tx.execute(
-                        "INSERT OR IGNORE INTO skill_smart_tag_relations
-                            (skill_id, smart_tag_id) VALUES (?1, ?2)",
-                        params![skill_id, trimmed],
-                    )?;
-                }
+                        (skill_id, smart_tag_id) VALUES (?1, ?2)",
+                    params![skill_id, trimmed],
+                )?;
             }
         }
         tx.commit()?;
         Ok(())
     }
 
-    /// Bind a skill to a single smart tag (idempotent).
+    /// Bind a skill to a single smart tag (idempotent). See
+    /// [`set_smart_tags_for_skill`] for why this targets the 2-column schema
+    /// directly rather than probing for a `created_at` column.
     pub fn bind_smart_tag_to_skill(&self, skill_id: &str, smart_tag_id: &str) -> Result<()> {
         let conn = self.conn.lock().unwrap();
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs() as i64)
-            .unwrap_or(0);
-        // See set_smart_tags_for_skill: try the created_at shape first for
-        // forward-compat, fall back to the 2-column shape on this version's
-        // fresh schema.
-        let res = conn.execute(
+        conn.execute(
             "INSERT OR IGNORE INTO skill_smart_tag_relations
-                (skill_id, smart_tag_id, created_at) VALUES (?1, ?2, ?3)",
-            params![skill_id, smart_tag_id, now],
-        );
-        if res.is_err() {
-            conn.execute(
-                "INSERT OR IGNORE INTO skill_smart_tag_relations
-                    (skill_id, smart_tag_id) VALUES (?1, ?2)",
-                params![skill_id, smart_tag_id],
-            )?;
-        }
+                (skill_id, smart_tag_id) VALUES (?1, ?2)",
+            params![skill_id, smart_tag_id],
+        )?;
         Ok(())
     }
 
@@ -1621,10 +1664,12 @@ impl SkillStore {
 
     /// Returns a map: skill_id -> vec of smart_tag_ids. Used to annotate
     /// every managed skill with its smart-tag membership in one query.
+    /// Order is stable (sorted by smart_tag_id) so UI rendering doesn't flicker.
     pub fn get_smart_tags_map(&self) -> Result<std::collections::HashMap<String, Vec<String>>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT skill_id, smart_tag_id FROM skill_smart_tag_relations",
+            "SELECT skill_id, smart_tag_id FROM skill_smart_tag_relations
+             ORDER BY smart_tag_id",
         )?;
         let rows = stmt.query_map([], |row| {
             Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
@@ -1638,9 +1683,14 @@ impl SkillStore {
     }
 
     /// Wipe both smart-tag tables: all smart_tags and all skill bindings.
-    /// Used by the "import from text" flow, which clears then rebuilds. Runs
-    /// inside a single transaction so a failure leaves the previous state
-    /// intact. Does NOT touch the `skills` table or simple `skill_tags`.
+    /// Used by the "import from text" flow, which clears then rebuilds.
+    ///
+    /// **Note**: this is its own transaction. The import flow should prefer
+    /// [`reimport_smart_tags_atomic`] which clears + rebuilds in ONE
+    /// transaction — calling this then `bulk_import_smart_tags` separately
+    /// risks losing all existing tags if the import half fails (the clear
+    /// has already committed). Kept for any external caller that wants a
+    /// standalone wipe. Does NOT touch the `skills` table or simple `skill_tags`.
     pub fn clear_all_smart_tags(&self) -> Result<()> {
         let conn = self.conn.lock().unwrap();
         let tx = conn.unchecked_transaction()?;
@@ -1663,16 +1713,28 @@ impl SkillStore {
     /// skill_ids to bind. `sort_order` follows the slice order. Tag ids are
     /// generated as `tag-import-<idx>` for stable, re-importable ids.
     /// Returns (tags_created, bindings_created).
+    ///
+    /// **Note**: does NOT clear existing tags first — use
+    /// [`reimport_smart_tags_atomic`] for the clear+rebuild flow so a failed
+    /// import can't wipe existing data.
     pub fn bulk_import_smart_tags(
         &self,
         entries: &[SmartTagImportEntry],
     ) -> Result<(usize, usize)> {
-        let conn = self.conn.lock().unwrap();
+        self.with_transaction(|tx| Self::bulk_import_smart_tags_tx(tx, entries))
+    }
+
+    /// Transaction-scoped core of [`bulk_import_smart_tags`]. Writes tags and
+    /// bindings against the given `tx` without committing — lets a caller wrap
+    /// it (and a clear) in one atomic transaction.
+    pub fn bulk_import_smart_tags_tx(
+        tx: &Transaction<'_>,
+        entries: &[SmartTagImportEntry],
+    ) -> Result<(usize, usize)> {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs() as i64)
             .unwrap_or(0);
-        let tx = conn.unchecked_transaction()?;
 
         let mut tags_created = 0usize;
         let mut bindings_created = 0usize;
@@ -1700,25 +1762,35 @@ impl SkillStore {
                 if trimmed.is_empty() {
                     continue;
                 }
-                // See set_smart_tags_for_skill: try the created_at shape first
-                // (forward-compat), fall back to 2-column shape on fresh schema.
-                let res = tx.execute(
+                // skill_smart_tag_relations has exactly (skill_id, smart_tag_id)
+                // in this fork's schema (migrations.rs v7→v8). INSERT OR IGNORE
+                // keeps the import idempotent across re-runs on the same set.
+                tx.execute(
                     "INSERT OR IGNORE INTO skill_smart_tag_relations
-                        (skill_id, smart_tag_id, created_at) VALUES (?1, ?2, ?3)",
-                    params![trimmed, id, now],
-                );
-                if res.is_err() {
-                    tx.execute(
-                        "INSERT OR IGNORE INTO skill_smart_tag_relations
-                            (skill_id, smart_tag_id) VALUES (?1, ?2)",
-                        params![trimmed, id],
-                    )?;
-                }
+                        (skill_id, smart_tag_id) VALUES (?1, ?2)",
+                    params![trimmed, id],
+                )?;
                 bindings_created += 1;
             }
         }
-        tx.commit()?;
         Ok((tags_created, bindings_created))
+    }
+
+    /// Atomically clear both smart-tag tables and rebuild from `entries` in a
+    /// SINGLE transaction. If the rebuild fails for any reason (FK violation,
+    /// disk full, …) the transaction rolls back and the previous tags survive
+    /// untouched — unlike calling [`clear_all_smart_tags`] then
+    /// [`bulk_import_smart_tags`], where a failed insert after a committed
+    /// clear would lose all existing data.
+    pub fn reimport_smart_tags_atomic(
+        &self,
+        entries: &[SmartTagImportEntry],
+    ) -> Result<(usize, usize)> {
+        self.with_transaction(|tx| {
+            tx.execute("DELETE FROM skill_smart_tag_relations", [])?;
+            tx.execute("DELETE FROM smart_tags", [])?;
+            Self::bulk_import_smart_tags_tx(tx, entries)
+        })
     }
 
     // ── Audit log ──
@@ -1886,22 +1958,23 @@ mod scenario_membership_tests {
         let tmp = tempdir().unwrap();
         let store = SkillStore::new(&tmp.path().join("test.db")).unwrap();
 
-        store.insert_scenario(&ScenarioRecord {
-            id: "s1".to_string(),
-            name: "S1".to_string(),
-            description: None,
-            icon: None,
-            sort_order: 0,
-            created_at: 1,
-            updated_at: 1,
-        })
-        .unwrap();
+        store
+            .insert_scenario(&ScenarioRecord {
+                id: "s1".to_string(),
+                name: "S1".to_string(),
+                description: None,
+                icon: None,
+                sort_order: 0,
+                created_at: 1,
+                updated_at: 1,
+            })
+            .unwrap();
         store.upsert_skill(&sample_skill("k1")).unwrap();
 
         let memberships = vec![
-            membership("s1", "k1"),       // valid
-            membership("s1", "ghost"),    // skill missing
-            membership("ghost-s", "k1"),  // scenario missing
+            membership("s1", "k1"),      // valid
+            membership("s1", "ghost"),   // skill missing
+            membership("ghost-s", "k1"), // scenario missing
         ];
 
         // Must not panic with a FOREIGN KEY constraint failure.
@@ -1911,7 +1984,9 @@ mod scenario_membership_tests {
 
         assert_eq!(store.get_skill_ids_for_scenario("s1").unwrap(), vec!["k1"]);
         assert_eq!(
-            store.get_enabled_tools_for_scenario_skill("s1", "k1").unwrap(),
+            store
+                .get_enabled_tools_for_scenario_skill("s1", "k1")
+                .unwrap(),
             vec!["ToolA"]
         );
         assert!(store
