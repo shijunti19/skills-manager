@@ -180,7 +180,7 @@ pub enum StripOutcome {
 }
 
 /// Clear the `description` field value in a SKILL.md document, keeping the
-/// key (`description:`) present but with an empty value.
+/// key present and setting its value to a placeholder dot (`description: .`).
 /// Everything else is preserved byte-for-byte.
 ///
 /// Handles all common YAML representations of the value:
@@ -281,14 +281,14 @@ pub fn strip_description_line(content: &str) -> String {
         key_idx
     };
 
-    // Rebuild the document: keep `description:` key but clear its value.
+    // Rebuild the document: keep `description:` key with a placeholder dot.
     let mut out = String::with_capacity(content.len());
     for (i, line) in lines.iter().enumerate() {
         if i == key_idx {
-            // Preserve the `description:` key with an empty value.
+            // Replace the value with a placeholder dot (`.`).
             // Preserve the original line ending style (\n or \r\n).
             let ending = if line.ends_with("\r\n") { "\r\n" } else { "\n" };
-            out.push_str("description:");
+            out.push_str("description: .");
             out.push_str(ending);
         } else if i > key_idx && i <= last_to_remove {
             continue; // skip block scalar body lines (if any)
@@ -589,12 +589,12 @@ mod tests {
     fn strip_description_single_line() {
         let content = "---\nname: foo\ndescription: hello world\n---\nbody\n";
         let out = strip_description_line(content);
-        // `description:` key stays, value is cleared
-        assert!(out.contains("description:"));
+        // `description:` key stays, value replaced with a placeholder dot
+        assert!(out.contains("description: ."));
         assert!(out.contains("name: foo"));
         assert!(out.contains("body"));
         // Check exact output
-        assert_eq!(out, "---\nname: foo\ndescription:\n---\nbody\n");
+        assert_eq!(out, "---\nname: foo\ndescription: .\n---\nbody\n");
     }
 
     #[test]
@@ -644,10 +644,10 @@ mod tests {
     fn strip_description_preserves_other_fields() {
         let content = "---\nname: foo\nauthor: me\ndescription: bar\nversion: 1.0\n---\n";
         let out = strip_description_line(content);
-        // `description:` key stays with empty value, other keys in original order.
+        // `description:` key stays with a placeholder dot, other keys in original order.
         assert_eq!(
             out,
-            "---\nname: foo\nauthor: me\ndescription:\nversion: 1.0\n---\n".to_string()
+            "---\nname: foo\nauthor: me\ndescription: .\nversion: 1.0\n---\n".to_string()
         );
     }
 
@@ -680,7 +680,15 @@ mod tests {
     fn strip_description_empty_value() {
         let content = "---\nname: foo\ndescription:\n---\n";
         let out = strip_description_line(content);
-        // Already empty or absent → keep as-is (NoDescription path in dir-level)
+        // Empty value also gets the placeholder dot
+        assert_eq!(out, "---\nname: foo\ndescription: .\n---\n");
+    }
+
+    #[test]
+    fn strip_description_already_dot_unchanged() {
+        let content = "---\nname: foo\ndescription: .\n---\n";
+        let out = strip_description_line(content);
+        // Already the placeholder dot → idempotent, unchanged
         assert_eq!(out, content);
     }
 
