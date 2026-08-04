@@ -37,14 +37,15 @@ import { useApp } from "../context/AppContext";
 import { useMultiSelect } from "../hooks/useMultiSelect";
 import { ConfirmDialog } from "../components/ConfirmDialog";
 import { TagRenameDialog } from "../components/TagRenameDialog";
-import { DeleteSkillButton } from "../components/DeleteSkillButton";
 import { SkillDetailPanel } from "../components/SkillDetailPanel";
 import { MultiSelectToolbar } from "../components/MultiSelectToolbar";
 import { BatchTagDialog } from "../components/BatchTagDialog";
 import { SkillTagPickerDialog } from "../components/SkillTagPickerDialog";
 import { SyncDots } from "../components/SyncDots";
+import { ToggleSwitch } from "../components/ToggleSwitch";
+import { CardActionMenu } from "../components/CardActionMenu";
 import * as api from "../lib/tauri";
-import { getTagActiveColor, getTagColor, UNTAGGED_FILTER } from "../lib/skillTags";
+import { getTagActiveColor, getTagColor, pruneStaleTagFilters, UNTAGGED_FILTER } from "../lib/skillTags";
 import type {
   ManagedSkill,
   ToolInfo,
@@ -74,10 +75,20 @@ interface SortableSkillItemProps {
   id: string;
   disabled: boolean;
   className?: string;
+  /** Overrides the handle styling (grid cards render it inside the status-dot slot). */
+  handleClassName?: string;
+  handleTitle?: string;
   children: (dragHandle: React.ReactNode) => React.ReactNode;
 }
 
-function SortableSkillItem({ id, disabled, className, children }: SortableSkillItemProps) {
+function SortableSkillItem({
+  id,
+  disabled,
+  className,
+  handleClassName,
+  handleTitle,
+  children,
+}: SortableSkillItemProps) {
   const {
     attributes,
     listeners,
@@ -99,7 +110,11 @@ function SortableSkillItem({ id, disabled, className, children }: SortableSkillI
       ref={setActivatorNodeRef}
       {...listeners}
       onClick={(e) => e.stopPropagation()}
-      className="flex cursor-grab items-center justify-center rounded p-1 text-faint transition-colors hover:bg-surface-hover hover:text-muted active:cursor-grabbing"
+      title={handleTitle}
+      className={
+        handleClassName ??
+        "flex cursor-grab items-center justify-center rounded p-1 text-faint transition-colors hover:bg-surface-hover hover:text-muted active:cursor-grabbing"
+      }
     >
       <GripVertical className="h-4 w-4" />
     </div>
@@ -428,6 +443,13 @@ export function MySkills() {
     [t, refreshManagedSkills, refreshSmartTags],
   );
 
+  // upstream overflow menu / delete-confirm state (CardActionMenu 体系)
+  // tagEditSkillId is read-only here (used by SortableSkillItem z-index check);
+  // me edits tags via SkillTagPickerDialog, so no setter / inline input state.
+  const [tagEditSkillId] = useState<string | null>(null);
+  const [menuSkillId, setMenuSkillId] = useState<string | null>(null);
+  const [skillToDelete, setSkillToDelete] = useState<ManagedSkill | null>(null);
+
   const [presetSkillOrder, setPresetSkillOrder] = useState<string[]>([]);
 
   const viewedPresetName = viewedPreset?.name || t("mySkills.currentPresetFallback");
@@ -463,7 +485,21 @@ export function MySkills() {
     refreshAllTags();
   }, [skills]);
 
-  // Close the tag context menu on Escape.
+  // Prune tag filters whose pill disappeared (e.g. its last skill was deleted),
+  // otherwise a stale filter silently hides everything. An empty skill list
+  // says nothing about which tags are valid, so wait for one before pruning.
+  // A tag still carried by a loaded skill counts as available even when it is
+  // missing from `allTags`: that list is refetched asynchronously and lags
+  // `skills`, and in that window a rename would otherwise drop the filter that
+  // `replaceTagInFilters` just moved onto the new name.
+  useEffect(() => {
+    if (skills.length === 0) return;
+    const hasUntagged = skills.some((skill) => skill.tags.length === 0);
+    const available = [...allTags, ...skills.flatMap((skill) => skill.tags)];
+    setTagFilters((prev) => pruneStaleTagFilters(prev, available, hasUntagged));
+  }, [allTags, skills]);
+
+  // Close the tag context menu on Escape (click-outside is handled by its backdrop).
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key !== "Escape") return;
@@ -478,6 +514,22 @@ export function MySkills() {
     if (next.has(value)) next.delete(value);
     else next.add(value);
     return next;
+  };
+
+  // A filter can outlive the control that set it (the tag row hides itself once
+  // no tag is left), so the empty state carries the way out. `filterMode` is
+  // reset too — its control never hides, but a button labelled "clear filters"
+  // that leaves one of them on is a lie.
+  const hasActiveFilters =
+    search.trim() !== "" ||
+    sourceFilters.size > 0 ||
+    tagFilters.size > 0 ||
+    filterMode !== "all";
+  const clearFilters = () => {
+    setSearch("");
+    setSourceFilters(new Set());
+    setTagFilters(new Set());
+    setFilterMode("all");
   };
 
   const skillDisplayNames = useMemo(() => {
@@ -1528,6 +1580,11 @@ export function MySkills() {
           <p className="text-[13px] text-muted">
             {skills.length === 0 ? t("mySkills.addFirst") : t("mySkills.noMatch")}
           </p>
+          {hasActiveFilters && (
+            <button onClick={clearFilters} className="app-button-secondary mt-4">
+              {t("mySkills.clearFilters")}
+            </button>
+          )}
         </div>
       ) : (
         <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={handleDragEnd}>
@@ -1548,6 +1605,11 @@ export function MySkills() {
               ? skill.preset_ids.includes(viewedPreset.id)
               : false;
             const badge = statusBadge(skill);
+            const hasUpdate =
+              skill.update_status === "update_available" && canRefresh(skill);
+            // The header pill is hidden in multi-select, so the body badge has to
+            // take over — otherwise the update state vanishes entirely.
+            const showUpdatePill = hasUpdate && !isMultiSelect;
             const isMissingLocalSource =
               skill.update_status === "source_missing"
               && (skill.source_type === "local" || skill.source_type === "import");
@@ -1559,69 +1621,122 @@ export function MySkills() {
                   key={skill.id}
                   id={skill.id}
                   disabled={!canDrag}
+                  className={
+                    tagEditSkillId === skill.id || menuSkillId === skill.id
+                      ? "relative z-30"
+                      : undefined
+                  }
+                  handleTitle={t("mySkills.dragToReorder")}
+                  handleClassName="absolute inset-0 flex cursor-grab items-center justify-center rounded text-faint opacity-0 transition-opacity hover:text-muted group-hover:opacity-100 active:cursor-grabbing"
                 >
                 {(dragHandle) => (
                 <div
                   className={cn(
-                    "app-panel group relative flex h-full cursor-pointer flex-col transition-all hover:border-border hover:bg-surface-hover",
-                    enabledInPreset && "border-l-2 border-l-accent",
+                    "app-panel group relative flex h-full cursor-pointer flex-col shadow-card transition-all hover:-translate-y-px hover:border-border hover:shadow-card-hover",
                     isMultiSelect && selectedIds.has(skill.id) && "ring-1 ring-accent border-accent/40"
                   )}
                   onClick={() =>
                     isMultiSelect ? toggleSelect(skill.id) : openSkillDetailById(skill.id)
                   }
                 >
-                  <div className={cn("absolute right-2 top-2 z-10 flex items-center gap-0.5 rounded-lg border border-border-subtle bg-surface px-1 py-0.5 opacity-0 shadow-sm transition-all", !isMultiSelect && "group-hover:opacity-100")}>
-                    {dragHandle}
-                    <button
-                      onClick={(e) => { e.stopPropagation(); handleCheckUpdate(skill); }}
-                      disabled={checkingSkillId === skill.id}
-                      className="rounded p-1 text-muted transition-colors hover:bg-surface-hover hover:text-secondary disabled:opacity-50"
-                      title={t("mySkills.updateActions.check")}
-                    >
-                      <RefreshCw className={cn("h-3.5 w-3.5", checkingSkillId === skill.id && "animate-spin")} />
-                    </button>
-                    {canRefresh(skill) ? (
-                      <button
-                        onClick={(e) => { e.stopPropagation(); handleRefreshSkill(skill); }}
-                        disabled={updatingSkillId === skill.id}
-                        className="rounded p-1 text-accent-light transition-colors hover:bg-accent-bg disabled:opacity-50"
-                        title={refreshLabel(skill)}
-                      >
-                        <RotateCcw className={cn("h-3.5 w-3.5", updatingSkillId === skill.id && "animate-spin")} />
-                      </button>
-                    ) : null}
-                    <DeleteSkillButton
-                      skill={skill}
-                      onConfirm={handleDeleteSkill}
-                      buttonClassName="p-1"
-                    />
-                  </div>
                   {deletingIds.has(skill.id) && (
                     <div className="absolute inset-0 z-20 flex items-center justify-center rounded-xl bg-surface/70 backdrop-blur-[1px]">
                       <Loader2 className="h-5 w-5 animate-spin text-muted" />
                     </div>
                   )}
 
-                  <div className="flex items-center gap-2.5 px-3.5 pr-20 pt-3 pb-1.5">
-                    {isMultiSelect && (
-                      selectedIds.has(skill.id)
-                        ? <SquareCheck className="h-3.5 w-3.5 shrink-0 text-accent" />
-                        : <Square className="h-3.5 w-3.5 shrink-0 text-faint" />
-                    )}
+                  <div className="flex items-center gap-2.5 px-3.5 pt-3 pb-1.5">
+                    {/* Fixed-width slot: status dot / drag handle on hover / checkbox in multi-select */}
+                    <div className="relative flex h-4 w-4 shrink-0 items-center justify-center">
+                      {isMultiSelect ? (
+                        selectedIds.has(skill.id)
+                          ? <SquareCheck className="h-3.5 w-3.5 text-accent" />
+                          : <Square className="h-3.5 w-3.5 text-faint" />
+                      ) : (
+                        <>
+                          <span
+                            className={cn(
+                              "h-2 w-2 rounded-full transition-opacity",
+                              canDrag && "group-hover:opacity-0",
+                              enabledInPreset
+                                ? "bg-accent-light shadow-[0_0_0_3px_var(--color-accent-bg)]"
+                                : "bg-surface-active"
+                            )}
+                            title={enabledInPreset ? t("mySkills.enabledButton") : t("mySkills.notInPreset")}
+                          />
+                          {dragHandle}
+                        </>
+                      )}
+                    </div>
                     <h3
                       className="flex-1 truncate text-[14px] font-semibold text-primary group-hover:text-accent-light"
                       title={displayName}
                     >
                       {displayName}
                     </h3>
+                    {showUpdatePill && (
+                      <button
+                        onClick={(e) => { e.stopPropagation(); handleRefreshSkill(skill); }}
+                        disabled={updatingSkillId === skill.id}
+                        className="inline-flex shrink-0 items-center gap-1 rounded-full bg-amber-500/12 px-2 py-0.5 text-[11px] font-medium text-amber-600 outline-none transition-colors hover:bg-amber-500/20 disabled:opacity-50 dark:text-amber-400"
+                        title={refreshLabel(skill)}
+                      >
+                        <RotateCcw className={cn("h-2.5 w-2.5", updatingSkillId === skill.id && "animate-spin")} />
+                        {t("mySkills.updateActions.update")}
+                      </button>
+                    )}
+                    {!isMultiSelect && (
+                      <>
+                        <CardActionMenu
+                          label={t("mySkills.moreActions")}
+                          onOpenChange={(open) => setMenuSkillId(open ? skill.id : null)}
+                          className={cn(
+                            "transition-opacity",
+                            menuSkillId === skill.id
+                              ? "opacity-100"
+                              : "opacity-0 group-hover:opacity-100"
+                          )}
+                          actions={[
+                            {
+                              key: "check",
+                              label: t("mySkills.updateActions.check"),
+                              icon: <RefreshCw className={cn("h-3.5 w-3.5", checkingSkillId === skill.id && "animate-spin")} />,
+                              disabled: checkingSkillId === skill.id,
+                              onSelect: () => handleCheckUpdate(skill),
+                            },
+                            ...(canRefresh(skill)
+                              ? [{
+                                  key: "refresh",
+                                  label: refreshLabel(skill),
+                                  icon: <RotateCcw className={cn("h-3.5 w-3.5", updatingSkillId === skill.id && "animate-spin")} />,
+                                  disabled: updatingSkillId === skill.id,
+                                  onSelect: () => handleRefreshSkill(skill),
+                                }]
+                              : []),
+                            {
+                              key: "delete",
+                              label: t("common.delete"),
+                              icon: <Trash2 className="h-3.5 w-3.5" />,
+                              danger: true,
+                              onSelect: () => setSkillToDelete(skill),
+                            },
+                          ]}
+                        />
+                        <ToggleSwitch
+                          checked={enabledInPreset}
+                          disabled={!viewedPreset}
+                          onChange={() => handleTogglePreset(skill)}
+                          title={enabledInPreset ? t("mySkills.enabledButton") : t("mySkills.enable")}
+                        />
+                      </>
+                    )}
                   </div>
 
                   <div className="px-3.5 pb-3">
                     <p className="text-[13px] leading-[18px] text-muted truncate">
                       {skill.description || "—"}
                     </p>
-                    {(badge || conflictIds.has(skill.id)) && (
+                    {((badge && !showUpdatePill) || conflictIds.has(skill.id)) && (
                       <div className="mt-2 flex flex-wrap items-center gap-1.5">
                         {conflictIds.has(skill.id) && (
                           <button
@@ -1632,7 +1747,7 @@ export function MySkills() {
                             {t("mySkills.needsAttention")}
                           </button>
                         )}
-                        {badge && (
+                        {badge && !showUpdatePill && (
                           <span
                             className={cn(
                               "rounded-full px-2 py-0.5 text-[13px] font-medium",
@@ -1713,46 +1828,33 @@ export function MySkills() {
                     </div>
                   </div>
 
-                  <div className="mt-auto flex items-center justify-between gap-2 border-t border-border-subtle px-3.5 py-2.5">
+                  <div className="mt-auto flex items-center justify-between gap-2 border-t border-border-faint px-3.5 py-2.5">
                     <div className="flex min-w-0 items-center gap-1.5">
-                      <span className="inline-flex shrink-0 items-center gap-1 text-[13px] text-muted">
+                      <span className="inline-flex shrink-0 items-center gap-1 text-[12px] text-muted">
                         {sourceIcon(skill.source_type)}
                         {sourceTypeLabel(skill)}
                       </span>
                       {enabledInPreset && (
                         <>
                           <span className="text-faint">·</span>
-                          <span className="truncate text-[13px] font-medium text-amber-600 dark:text-amber-400/80">
+                          <span className="truncate text-[12px] font-medium text-amber-600 dark:text-amber-400/80">
                             {viewedPresetName}
                           </span>
                         </>
                       )}
                     </div>
-                    <div className="flex items-center gap-2 shrink-0">
-                      <SyncDots
-                        skill={skill}
-                        tools={tools}
-                        limit={6}
-                        onToggle={
-                          isMultiSelect
-                            ? undefined
-                            : (tool, enabled) => handleToggleSkillTarget(skill, tool, enabled)
-                        }
-                        pendingKey={togglingTarget?.skillId === skill.id ? togglingTarget.tool : null}
-                      />
-                      <button
-                        onClick={(e) => { e.stopPropagation(); handleTogglePreset(skill); }}
-                        disabled={!viewedPreset}
-                        className={cn(
-                          "rounded px-2 py-1 text-[13px] font-medium transition-colors outline-none",
-                          enabledInPreset
-                            ? "text-emerald-600 dark:text-emerald-400 hover:bg-emerald-500/10"
-                            : "text-muted hover:bg-surface-hover hover:text-secondary"
-                        )}
-                      >
-                        {enabledInPreset ? t("mySkills.enabledButton") : t("mySkills.enable")}
-                      </button>
-                    </div>
+                    <SyncDots
+                      className="shrink-0"
+                      skill={skill}
+                      tools={tools}
+                      limit={6}
+                      onToggle={
+                        isMultiSelect
+                          ? undefined
+                          : (tool, enabled) => handleToggleSkillTarget(skill, tool, enabled)
+                      }
+                      pendingKey={togglingTarget?.skillId === skill.id ? togglingTarget.tool : null}
+                    />
                   </div>
                 </div>
                 )}
@@ -1761,12 +1863,18 @@ export function MySkills() {
             }
 
             return (
-              <SortableSkillItem key={skill.id} id={skill.id} disabled={!canDrag}>
+              <SortableSkillItem
+                key={skill.id}
+                id={skill.id}
+                disabled={!canDrag}
+                className={menuSkillId === skill.id ? "relative z-30" : undefined}
+                handleTitle={t("mySkills.dragToReorder")}
+                handleClassName="absolute inset-0 flex cursor-grab items-center justify-center rounded text-faint opacity-0 transition-opacity hover:text-muted group-hover:opacity-100 active:cursor-grabbing"
+              >
               {(dragHandle) => (
               <div
                 className={cn(
                   "app-panel group relative flex cursor-pointer items-center gap-3.5 rounded-xl border-transparent px-3.5 py-3 transition-all hover:border-border hover:bg-surface-hover",
-                  enabledInPreset && "border-l-2 border-l-accent",
                   isMultiSelect && selectedIds.has(skill.id) && "ring-1 ring-accent border-accent/40"
                 )}
                 onClick={() =>
@@ -1778,12 +1886,28 @@ export function MySkills() {
                     <Loader2 className="h-5 w-5 animate-spin text-muted" />
                   </div>
                 )}
-                {dragHandle}
-                {isMultiSelect && (
-                  selectedIds.has(skill.id)
-                    ? <SquareCheck className="h-3.5 w-3.5 shrink-0 text-accent" />
-                    : <Square className="h-3.5 w-3.5 shrink-0 text-faint" />
-                )}
+                {/* Same fixed slot as the grid card: status dot / drag handle / checkbox */}
+                <div className="relative flex h-4 w-4 shrink-0 items-center justify-center">
+                  {isMultiSelect ? (
+                    selectedIds.has(skill.id)
+                      ? <SquareCheck className="h-3.5 w-3.5 text-accent" />
+                      : <Square className="h-3.5 w-3.5 text-faint" />
+                  ) : (
+                    <>
+                      <span
+                        className={cn(
+                          "h-2 w-2 rounded-full transition-opacity",
+                          canDrag && "group-hover:opacity-0",
+                          enabledInPreset
+                            ? "bg-accent-light shadow-[0_0_0_3px_var(--color-accent-bg)]"
+                            : "bg-surface-active"
+                        )}
+                        title={enabledInPreset ? t("mySkills.enabledButton") : t("mySkills.notInPreset")}
+                      />
+                      {dragHandle}
+                    </>
+                  )}
+                </div>
 
                 <h3
                   className="w-[180px] shrink-0 truncate text-[14px] font-semibold text-secondary group-hover:text-primary"
@@ -1840,7 +1964,17 @@ export function MySkills() {
                       {t("mySkills.needsAttention")}
                     </button>
                   )}
-                  {badge && (
+                  {hasUpdate && !isMultiSelect ? (
+                    <button
+                      onClick={(e) => { e.stopPropagation(); handleRefreshSkill(skill); }}
+                      disabled={updatingSkillId === skill.id}
+                      className="inline-flex shrink-0 items-center gap-1 rounded-full bg-amber-500/12 px-2 py-0.5 text-[11px] font-medium text-amber-600 outline-none transition-colors hover:bg-amber-500/20 disabled:opacity-50 dark:text-amber-400"
+                      title={refreshLabel(skill)}
+                    >
+                      <RotateCcw className={cn("h-2.5 w-2.5", updatingSkillId === skill.id && "animate-spin")} />
+                      {t("mySkills.updateActions.update")}
+                    </button>
+                  ) : badge && (
                     <span
                       className={cn(
                         "rounded-full px-2 py-0.5 text-[12px] font-medium",
@@ -1873,61 +2007,70 @@ export function MySkills() {
                   )}
                 </div>
 
-                <div className={cn("flex shrink-0 items-center gap-1 opacity-0 transition-opacity", !isMultiSelect && "group-hover:opacity-100")}>
-                  {isMissingLocalSource && (
-                    <>
-                      <button
-                        onClick={(e) => { e.stopPropagation(); handleRelinkSource(skill); }}
-                        disabled={updatingSkillId === skill.id}
-                        className="rounded px-2 py-0.5 text-[13px] font-medium text-secondary transition-colors hover:bg-surface-hover disabled:opacity-50"
-                      >
-                        {t("mySkills.updateActions.relink")}
-                      </button>
-                      <button
-                        onClick={(e) => { e.stopPropagation(); handleDetachSource(skill); }}
-                        disabled={updatingSkillId === skill.id}
-                        className="rounded px-2 py-0.5 text-[13px] font-medium text-muted transition-colors hover:bg-surface-hover hover:text-secondary disabled:opacity-50"
-                      >
-                        {t("mySkills.updateActions.detachSource")}
-                      </button>
-                    </>
-                  )}
-                  <button
-                    onClick={(e) => { e.stopPropagation(); handleTogglePreset(skill); }}
-                    disabled={!viewedPreset}
-                    className={cn(
-                      "rounded px-2 py-0.5 text-[13px] font-medium transition-colors outline-none",
-                      enabledInPreset
-                        ? "text-emerald-600 dark:text-emerald-400 hover:bg-emerald-500/10"
-                        : "text-muted hover:bg-surface-hover hover:text-secondary"
-                    )}
-                  >
-                    {enabledInPreset ? t("mySkills.enabledButton") : t("mySkills.enable")}
-                  </button>
-                  <button
-                    onClick={(e) => { e.stopPropagation(); handleCheckUpdate(skill); }}
-                    disabled={checkingSkillId === skill.id}
-                    className="rounded p-0.5 text-muted transition-colors hover:bg-surface-hover hover:text-secondary disabled:opacity-50"
-                    title={t("mySkills.updateActions.check")}
-                  >
-                    <RefreshCw className={cn("h-3.5 w-3.5", checkingSkillId === skill.id && "animate-spin")} />
-                  </button>
-                  {canRefresh(skill) ? (
+                {isMissingLocalSource && !isMultiSelect && (
+                  <div className="flex shrink-0 items-center gap-1 opacity-0 transition-opacity group-hover:opacity-100">
                     <button
-                      onClick={(e) => { e.stopPropagation(); handleRefreshSkill(skill); }}
+                      onClick={(e) => { e.stopPropagation(); handleRelinkSource(skill); }}
                       disabled={updatingSkillId === skill.id}
-                      className="rounded p-0.5 text-accent-light transition-colors hover:bg-accent-bg disabled:opacity-50"
-                      title={refreshLabel(skill)}
+                      className="rounded px-2 py-0.5 text-[13px] font-medium text-secondary transition-colors hover:bg-surface-hover disabled:opacity-50"
                     >
-                      <RotateCcw className={cn("h-3.5 w-3.5", updatingSkillId === skill.id && "animate-spin")} />
+                      {t("mySkills.updateActions.relink")}
                     </button>
-                  ) : null}
-                  <DeleteSkillButton
-                    skill={skill}
-                    onConfirm={handleDeleteSkill}
-                    buttonClassName="p-0.5"
-                  />
-                </div>
+                    <button
+                      onClick={(e) => { e.stopPropagation(); handleDetachSource(skill); }}
+                      disabled={updatingSkillId === skill.id}
+                      className="rounded px-2 py-0.5 text-[13px] font-medium text-muted transition-colors hover:bg-surface-hover hover:text-secondary disabled:opacity-50"
+                    >
+                      {t("mySkills.updateActions.detachSource")}
+                    </button>
+                  </div>
+                )}
+
+                {!isMultiSelect && (
+                  <div className="flex shrink-0 items-center gap-2">
+                    <CardActionMenu
+                      label={t("mySkills.moreActions")}
+                      onOpenChange={(open) => setMenuSkillId(open ? skill.id : null)}
+                      className={cn(
+                        "transition-opacity",
+                        menuSkillId === skill.id
+                          ? "opacity-100"
+                          : "opacity-0 group-hover:opacity-100"
+                      )}
+                      actions={[
+                        {
+                          key: "check",
+                          label: t("mySkills.updateActions.check"),
+                          icon: <RefreshCw className={cn("h-3.5 w-3.5", checkingSkillId === skill.id && "animate-spin")} />,
+                          disabled: checkingSkillId === skill.id,
+                          onSelect: () => handleCheckUpdate(skill),
+                        },
+                        ...(canRefresh(skill)
+                          ? [{
+                              key: "refresh",
+                              label: refreshLabel(skill),
+                              icon: <RotateCcw className={cn("h-3.5 w-3.5", updatingSkillId === skill.id && "animate-spin")} />,
+                              disabled: updatingSkillId === skill.id,
+                              onSelect: () => handleRefreshSkill(skill),
+                            }]
+                          : []),
+                        {
+                          key: "delete",
+                          label: t("common.delete"),
+                          icon: <Trash2 className="h-3.5 w-3.5" />,
+                          danger: true,
+                          onSelect: () => setSkillToDelete(skill),
+                        },
+                      ]}
+                    />
+                    <ToggleSwitch
+                      checked={enabledInPreset}
+                      disabled={!viewedPreset}
+                      onChange={() => handleTogglePreset(skill)}
+                      title={enabledInPreset ? t("mySkills.enabledButton") : t("mySkills.enable")}
+                    />
+                  </div>
+                )}
               </div>
               )}
               </SortableSkillItem>
@@ -1955,6 +2098,15 @@ export function MySkills() {
         message={t("mySkills.batchDeleteConfirm", { count: selectedIds.size })}
         onClose={() => setBatchDeleteConfirm(false)}
         onConfirm={handleBatchDelete}
+      />
+      <ConfirmDialog
+        open={skillToDelete !== null}
+        title={t("mySkills.delete")}
+        message={t("mySkills.deleteConfirm", { name: skillToDelete?.name || "" })}
+        onClose={() => setSkillToDelete(null)}
+        onConfirm={async () => {
+          if (skillToDelete) handleDeleteSkill(skillToDelete);
+        }}
       />
       <ConfirmDialog
         open={tagToDelete !== null}
