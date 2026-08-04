@@ -215,8 +215,19 @@ export function TagsView() {
       if (!prev) return prev;
       const next = new Set(prev.boundSkillIds);
       next.delete(skillId);
-      // keep the textarea in sync if it still holds that name
-      return { ...prev, boundSkillIds: next };
+      // Keep the textarea in sync: a stale name left in skillsText would be
+      // folded back into the binding set on Save (see handleSave), silently
+      // undoing this removal.
+      const removedName = skillsById[skillId]?.name;
+      let nextText = prev.skillsText;
+      if (removedName) {
+        const kept = nextText
+          .split(/[\s,]+/)
+          .map((s) => s.trim())
+          .filter((tok) => tok.length > 0 && tok !== removedName);
+        nextText = kept.join("\n");
+      }
+      return { ...prev, boundSkillIds: next, skillsText: nextText };
     });
   };
 
@@ -239,6 +250,14 @@ export function TagsView() {
     }
     setSaving(true);
     try {
+      // Fold any unpasted text into the bound set before saving. Without this,
+      // typing skill names into the textarea and clicking Save directly would
+      // silently bind nothing — the textarea only reaches `boundSkillIds` via
+      // the "Apply Matches" button, which users routinely skip.
+      const finalBound = new Set(editor.boundSkillIds);
+      const preview = parseSkillsText(editor.skillsText);
+      for (const id of preview.matched) finalBound.add(id);
+
       const input: api.SmartTagInput = {
         name,
         agents: [...editor.agents],
@@ -258,11 +277,11 @@ export function TagsView() {
       }
       const toAdd: string[] = [];
       const toRemove: string[] = [];
-      for (const sid of editor.boundSkillIds) {
+      for (const sid of finalBound) {
         if (!currentBound.has(sid)) toAdd.push(sid);
       }
       for (const sid of currentBound) {
-        if (!editor.boundSkillIds.has(sid)) toRemove.push(sid);
+        if (!finalBound.has(sid)) toRemove.push(sid);
       }
       for (const sid of toAdd) {
         const existing = smartTagsMap[sid] ?? [];
@@ -275,6 +294,11 @@ export function TagsView() {
         await api.bindSmartTagsToSkill(sid, existing.filter((x) => x !== saved.id));
       }
       toast.success(editor.id ? t("tags.updated") : t("tags.created"));
+      if (preview.unmatched.length > 0) {
+        toast.warning(
+          t("tags.filteredOut", { names: preview.unmatched.join(", ") }),
+        );
+      }
       setEditor(null);
       await loadAll();
     } catch (e) {

@@ -22,7 +22,7 @@ _Nothing yet._
 _Nothing yet._
 
 ### User-facing
-_Nothing yet._
+- **Smart tag editor now saves pasted skill bindings on Save** — Typing skill names into the "Bound skills" textarea and clicking Save used to silently bind nothing, because only the "Apply Matches" button moved them into the working set. Save now folds any matched names in the textarea into the binding set before persisting, and warns about unmatched tokens instead of dropping them quietly.
 
 ### Developer & Governance
 _Nothing yet._
