@@ -22,7 +22,13 @@ export function formatSkillLine(spec: string, skill: ManagedSkill): string {
     .replace(/\{\{name\}\}/g, skill.name)
     .replace(/\$\(path\)/g, path)
     .replace(/\$\{path\}/g, path)
-    .replace(/\{\{path\}\}/g, path);
+    .replace(/\{\{path\}\}/g, path)
+    // Bare (name)/(path) — the default spec "[$(name)]((path))" uses markdown
+    // link syntax where the URL placeholder is a bare (path) without $ prefix.
+    // Must run AFTER all prefixed variants so replacement values are not
+    // re-matched; name before path so a path containing "(name)" stays safe.
+    .replace(/\(name\)/g, skill.name)
+    .replace(/\(path\)/g, path);
 }
 
 /** Assemble the full generated prompt: tag descriptions + skill links + tag prompts. */
