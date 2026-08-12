@@ -301,14 +301,52 @@ export function AppProvider({ children }: { children: ReactNode }) {
     );
     if (!hasGitSkills || autoCheckInFlightRef.current) return;
 
+    // Cancellation flag: cleanup sets this and the Rust invoke has no
+    // front-end cancel handle, so every await boundary must re-check it
+    // before touching state. Without this, a hot reload mid-round left the
+    // pending invoke to resolve into an unmounted component, producing the
+    // "[TAURI] Couldn't find callback id" warnings.
+    let cancelled = false;
+    // Backoff for "repository is busy" collisions with the startup reindex.
+    // The Rust barrier (acquire_foreground) already waits up to 20s, but on
+    // very slow machines reindex can exceed 20s, so retry a few times before
+    // giving up silently. Only the check round is retried; the follow-up
+    // getManagedSkills/batchUpdateSkills don't take the repo lock.
+    const backoffMs = [5000, 15000, 30000];
+
     // Delay to avoid slowing down initial render
     const timer = setTimeout(() => {
       autoCheckInFlightRef.current = true;
       (async () => {
         try {
-          await api.checkAllSkillUpdates(false);
-          let skills = await api.getManagedSkills();
+          // Retry the check round on "busy" errors; other errors bail.
+          let lastErr: unknown = null;
+          let checkOk = false;
+          for (let attempt = 0; attempt <= backoffMs.length; attempt++) {
+            if (cancelled) break;
+            try {
+              await api.checkAllSkillUpdates(false);
+              checkOk = true;
+              break;
+            } catch (err) {
+              lastErr = err;
+              const msg = err instanceof Error ? err.message : String(err);
+              const isBusy =
+                msg.includes("is busy") || msg.includes("repository is busy");
+              if (!isBusy || attempt >= backoffMs.length) break;
+              await new Promise((resolve) =>
+                setTimeout(resolve, backoffMs[attempt])
+              );
+            }
+          }
+          if (cancelled || !checkOk) {
+            if (!cancelled && lastErr) {
+              console.error("Startup skill update round failed:", lastErr);
+            }
+            return;
+          }
 
+          let skills = await api.getManagedSkills();
           const autoUpdate = await api
             .getSettings("auto_update_apply")
             .catch(() => null);
@@ -339,11 +377,13 @@ export function AppProvider({ children }: { children: ReactNode }) {
             }
           }
 
+          if (cancelled) return;
           setManagedSkills(skills);
           notifyUpdatableSkills(skills);
           api.setSettings("auto_update_last_run_at", new Date().toISOString())
             .catch(() => {});
         } catch (err) {
+          if (cancelled) return;
           // Startup round is non-blocking and does not toast on failure, but
           // log so a broken check/update is still diagnosable.
           console.error("Startup skill update round failed:", err);
@@ -352,7 +392,10 @@ export function AppProvider({ children }: { children: ReactNode }) {
         }
       })();
     }, 3000);
-    return () => clearTimeout(timer);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [loading]);
 

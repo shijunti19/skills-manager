@@ -11,6 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 _Nothing yet._
 
 ### User-facing
+- **Startup skill-update check no longer fails when reindex is still running** — On launch the background reindex can hold the repository lock for several seconds while the 3s-delayed "check all skill updates" round fires. Because the per-skill lock acquire was non-blocking, every skill (e.g. 224) failed instantly with "skills repository is busy" and the whole round was silently abandoned. The batch now waits once up to 20s for the lock to drain before the per-skill loop, and the front-end retries on "busy" with a 5s/15s/30s backoff. Hot-reloading the app mid-round also no longer leaves dangling Tauri callbacks ("Couldn't find callback id") because the effect now tracks a cancellation flag across every await.
 - **Smart tag editor now saves pasted skill bindings on Save** — Typing skill names into the "Bound skills" textarea and clicking Save used to silently bind nothing, because only the "Apply Matches" button moved them into the working set. Save now folds any matched names in the textarea into the binding set before persisting, and warns about unmatched tokens instead of dropping them quietly.
 
 ### Developer & Governance

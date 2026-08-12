@@ -1171,6 +1171,19 @@ pub async fn check_all_skill_updates(
         // expired) between the two phases has no usable prefetch and is simply
         // left for the next round. Lock contention is still reported per skill
         // so the caller knows the check didn't complete for it.
+        //
+        // Barrier: on startup the background reindex (lib.rs setup) can still
+        // hold the lock when this command fires, and the per-skill `acquire`
+        // below is non-blocking, so without a wait here every skill would fail
+        // instantly with "busy" (the "Failed to check 224 skill(s)" startup
+        // error). Wait once up to FOREGROUND_WAIT for the lock to drain, then
+        // drop the barrier before the loop so concurrent user operations can
+        // still interleave between skills and per-skill contention is still
+        // reported.
+        match RepoLock::acquire_foreground("check skill update batch") {
+            Ok(_barrier) => {}
+            Err(err) => log::warn!("check all: barrier acquire failed: {}", err),
+        }
         let mut failed = Vec::new();
         for skill in &skills {
             let prefetched = if matches!(skill.source_type.as_str(), "git" | "skillssh") {
