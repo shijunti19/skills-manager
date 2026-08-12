@@ -12,6 +12,8 @@
   <a href="https://bbs.dguagua.com/topic/Cjkh4b5U5yk">
     <img src="https://img.shields.io/badge/%F0%9F%94%A5%20%E6%A0%87%E7%AD%BE%E5%8C%96%E7%AE%A1%E7%90%86%20Skills-%E4%B8%80%E4%B8%AA%E5%AF%B9%E8%AF%9D%E7%9C%81%E4%B8%8A%E7%99%BE%E4%B8%87%20Token-red?style=for-the-badge" alt="标签化管理 Skills，省下上百万 Token" />
   </a>
+  &nbsp;·&nbsp;
+  <strong><a href="https://skillsmanager.dev">skillsmanager.dev</a></strong>
 </p>
 
 > ### 🔥🔥🔥 标签化管理 Skills，一个对话直接省下**上百万 Token**！
@@ -78,6 +80,7 @@
 - **Backup & multi-device sync** — Connect a private GitHub repository with one sign-in (or any Git remote), and the app backs your library up automatically and keeps all connected devices in sync. Merges are skill-aware — a rename on one machine combines cleanly with an edit on another — and true conflicts never block: your local version stays put until you choose keep mine / use remote / keep both. Snapshot versions are restorable at any time.
 - **Activity log & Export Logs** — Install / remove / update / sync operations are recorded locally. Use **Settings → Export Logs** to bundle recent logs and activity history into a single zip for easier issue reports.
 - **Flexible app settings** — Configure repo path, sync mode, theme, text size, language, tray behavior, proxy, Git remote, update checks, and the order agents appear throughout the app — all in one place.
+- **In-app updates** — The app tells you when a new version is out and installs it for you on macOS and Windows. Nothing downloads or installs on its own: checking only notifies, and installing and restarting each take a click.
 
 ## Core Concepts
 
@@ -127,9 +130,11 @@ The Backup page offers three levels: **disconnect this machine** (other devices 
 
 ## Supported Tools
 
-Cursor · Claude Code · Codex · Grok · OpenCode · Amp · Kilo Code · Roo Code · Goose · Gemini CLI · GitHub Copilot · Windsurf · TRAE IDE · Antigravity · Clawdbot · Droid
+51 agents are supported out of the box, including:
 
-You can also add custom tools in **Settings** and manage their skills the same way.
+Claude Code · Codex · Cursor · GitHub Copilot · Gemini CLI · OpenCode · OpenClaw · Hermes Agent · OpenHands · Cline · Goose · Windsurf · Continue · Grok · Antigravity · Qwen Code · Crush · Kilo Code · Roo Code · Amp · Kiro CLI · Droid · TRAE IDE · Warp · Qoder · CodeBuddy
+
+**Settings** lists them all, leading with the ones detected on your machine. You can also add custom tools there and manage their skills the same way.
 
 ## In-App Help
 
@@ -174,11 +179,16 @@ npm run cli -- skills show db
 npm run cli -- skills install ./my-skill                       # local path
 npm run cli -- skills install https://github.com/foo/bar.git   # git URL
 npm run cli -- skills install vercel-labs/agent-skills@react-best-practices  # skills.sh
-npm run cli -- skills install foo/bar --sync                   # add to active preset + sync to agents
+npm run cli -- skills deploy <ref> --agent claude_code --agent codex  # deploy to both agents
 
 # Update / check from upstream (git skills re-clone, local skills re-import source)
 npm run cli -- skills update --all
 npm run cli -- skills check --all
+
+# Re-point an installed skill at a git source, keeping its id, tags, presets
+# and deployments (e.g. a local skill you have since published)
+npm run cli -- skills set-source <ref> --git-url https://github.com/you/skills/tree/main/my-skill --dry-run
+npm run cli -- skills set-source <ref> --git-url you/skills --subpath my-skill --force
 
 # Search the skills.sh marketplace (no API key needed)
 npm run cli -- skills search react --limit 5
@@ -187,11 +197,15 @@ npm run cli -- skills search react --limit 5
 npm run cli -- skills remove <ref> --dry-run
 npm run cli -- skills remove <ref> --yes
 
-# Enable / disable skills by changing preset membership
+# Organize preset membership (does not change agent files)
 npm run cli -- presets add-skill <preset> <ref>
 npm run cli -- presets remove-skill <preset> <ref>
 
-# Sync the active preset out to enabled agents
+# Inspect or change actual per-agent deployments
+npm run cli -- skills status <ref>
+npm run cli -- skills undeploy <ref> --agent codex --dry-run
+
+# Legacy exclusive active-preset sync
 npm run cli -- skills sync --dry-run
 npm run cli -- skills sync --tool claude_code
 
@@ -201,12 +215,18 @@ npm run cli -- skills adopt ~/.claude/skills
 
 # Tag
 npm run cli -- skills tag add <ref> web frontend
+npm run cli -- skills tag set <ref> web frontend
+npm run cli -- skills tag rename frontend web
+npm run cli -- skills tag delete obsolete --dry-run
 npm run cli -- skills tag list
 
-# Presets
+# Presets (CRUD and membership are organization-only; deploy changes agent files)
 npm run cli -- presets list
-npm run cli -- presets preview Default
-npm run cli -- presets apply Default
+npm run cli -- presets create "Web Dev" --description "Frontend work"
+npm run cli -- presets update "Web Dev" --name Frontend
+npm run cli -- presets deploy Frontend --agent codex
+npm run cli -- presets undeploy Frontend --agent claude_code
+npm run cli -- presets status Frontend
 npm run cli -- presets add-skill <preset> <skill>
 npm run cli -- presets remove-skill <preset> <skill>
 
@@ -221,9 +241,9 @@ npm run cli -- git commit -m "chore: update skills"
 
 Available command groups:
 - `repo` — inspect or change the configured base directory
-- `tools` — list detected tool targets and paths
-- `skills` — manage skills in the central library (`list / show / install / update / check / remove / enable / disable / sync / search / adopt / tag / export`)
-- `presets` — list presets, preview / apply, add or remove skills from a preset
+- `agents` (`tools` alias) — list agents and globally enable or disable them
+- `skills` — manage the central library and real per-agent deployments (`deploy / undeploy / status`)
+- `presets` — create, update, delete, organize, deploy, undeploy, and inspect presets
 - `git` — operate on the git-backed `skills/` repository (`clone`, `pull`, `push`, `commit`, `versions`, `restore`)
 
 Extra flags:
@@ -246,9 +266,11 @@ npm run cli:install
 
 This drops the binary at `~/.cargo/bin/skills-manager-cli`. Re-run after pulling updates to refresh it.
 
+Official releases also publish standalone CLI binaries for macOS arm64/x64, Windows x64, and Linux x64. Download the matching `skills-manager-cli-*` asset, make it executable on macOS/Linux, and place it on PATH.
+
 #### Concurrent use with the desktop app
 
-The CLI and desktop app share the same SQLite database. SQLite serializes writes safely, but the running app does not auto-refresh its in-memory caches when the CLI mutates state — restart or trigger a manual refresh in the app after `presets apply`, `git pull`, or other CLI write operations.
+The CLI and desktop app share the same SQLite database and repository lock. The app's filesystem watcher normally refreshes after CLI metadata or deployment changes. If the app was suspended while a command ran, trigger one manual refresh.
 
 ### Build
 
@@ -259,9 +281,9 @@ npm run cli:build
 
 ## Troubleshooting
 
-### macOS: Gatekeeper blocks the app on first launch
+### macOS: Gatekeeper blocks the app on first launch (v1.28.5 and earlier)
 
-Starting with **v1.29.0**, releases are signed with an Apple Developer ID certificate and notarized by Apple, so Gatekeeper lets them open normally — no warning, no Terminal commands.
+Releases from **v1.29.0** onward are signed with an Apple Developer ID certificate and notarized by Apple, so they open normally — no warning, no Terminal commands. If you are on an older build, upgrading is the fix.
 
 Releases **up to and including v1.28.5** predate notarization, and macOS blocks them:
 

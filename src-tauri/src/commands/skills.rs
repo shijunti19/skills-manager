@@ -13,7 +13,7 @@ use crate::core::{
     error::AppError,
     git_fetcher,
     install_cancel::InstallCancelRegistry,
-    installer,
+    installer, path_guard,
     repo_lock::RepoLock,
     scanner,
     skill_metadata::{self, is_valid_skill_dir},
@@ -1147,7 +1147,8 @@ pub async fn check_all_skill_updates(
                 // skill and collects any real failure per-skill, as before.
                 Err(err) => log::warn!(
                     "check all: skip-decision for {} failed, checking anyway: {}",
-                    skill.id, err.message
+                    skill.id,
+                    err.message
                 ),
             }
             if let Ok(source) = git_source_from_skill(skill) {
@@ -1766,6 +1767,256 @@ pub fn update_git_skill_internal(
     }
 }
 
+#[derive(Debug, Serialize)]
+pub struct SetSourceResult {
+    pub skill_id: String,
+    pub name: String,
+    /// Source type before the change (`local`, `import`, `git`, `skillssh`).
+    pub previous_source_type: String,
+    pub previous_source_ref: Option<String>,
+    pub clone_url: String,
+    pub subpath: Option<String>,
+    pub branch: Option<String>,
+    pub revision: String,
+    /// Whether the new source's content differs from the hash recorded for the
+    /// library copy. False means the re-point is metadata-only — no file is
+    /// rewritten. Compared against the recorded hash, not a fresh hash of the
+    /// central directory, so hand-edits made after install do not count as a
+    /// difference (and are left in place, since no file work runs).
+    pub content_changed: bool,
+    pub dry_run: bool,
+}
+
+/// Resolve the skill directory inside a fresh checkout, strictly.
+///
+/// Unlike [`resolve_skill_dir`], an explicit subpath that does not land on a
+/// valid skill directory inside `repo_dir` is an error rather than a silent
+/// fallback to repo-wide discovery. Re-pointing establishes a *new* source of
+/// truth for an already-installed skill, so guessing is worse than failing: a
+/// typo would otherwise install some unrelated directory — or the whole repo —
+/// over the existing central copy.
+fn resolve_repoint_skill_dir(repo_dir: &Path, subpath: Option<&str>) -> Result<PathBuf, AppError> {
+    let Some(subpath) = subpath else {
+        return if is_valid_skill_dir(repo_dir) {
+            Ok(repo_dir.to_path_buf())
+        } else {
+            Err(AppError::invalid_input(
+                "Repository root is not a skill directory (no SKILL.md); pass --subpath",
+            ))
+        };
+    };
+
+    // `Path::join` returns the argument verbatim when it is absolute, and `..`
+    // segments climb out, so the candidate must be checked before it is used.
+    // `is_path_safe` canonicalizes both sides, which also catches symlinks that
+    // point outside the checkout.
+    let candidate = repo_dir.join(subpath);
+    if !path_guard::is_path_safe(repo_dir, &candidate) {
+        return Err(AppError::invalid_input(format!(
+            "Subpath '{subpath}' resolves outside the repository"
+        )));
+    }
+    if !candidate.is_dir() {
+        return Err(AppError::not_found(format!(
+            "Subpath '{subpath}' does not exist in the repository"
+        )));
+    }
+    if !is_valid_skill_dir(&candidate) {
+        return Err(AppError::invalid_input(format!(
+            "Subpath '{subpath}' is not a skill directory (no SKILL.md)"
+        )));
+    }
+    Ok(candidate)
+}
+
+/// Re-point an installed skill at a git source **in place**.
+///
+/// The skill row is updated by id, so the skill id, tags, preset membership and
+/// deployment targets all survive. This is the only safe way to convert a
+/// `local` skill to a `git` one: `install` reuses a central directory only when
+/// the content hash matches exactly (see `installer::unique_skill_dest`) and
+/// otherwise silently allocates `<name>-2`, while `remove` + `install` drops the
+/// id and everything keyed to it.
+///
+/// When the new source's content differs from the current central copy the
+/// command refuses unless `force` is set. Re-pointing is not an update: the
+/// remote is not yet known to be the authoritative copy, so overwriting local
+/// content that may exist nowhere else has to be a deliberate choice.
+#[allow(clippy::too_many_arguments)]
+pub fn set_git_source_internal(
+    store: &SkillStore,
+    skill_id: &str,
+    git_url: &str,
+    subpath: Option<&str>,
+    branch: Option<&str>,
+    proxy_url: Option<&str>,
+    force: bool,
+    dry_run: bool,
+) -> Result<SetSourceResult, AppError> {
+    let skill = store
+        .get_skill_by_id(skill_id)
+        .map_err(AppError::db)?
+        .ok_or_else(|| AppError::not_found("Skill not found"))?;
+
+    // Validate before parsing: resolving a GitHub tree URL runs `ls-remote`, so
+    // an unvalidated URL would reach the network first. `install` validates its
+    // raw input the same way.
+    git_fetcher::validate_git_url(git_url).map_err(AppError::git)?;
+    let parsed = git_fetcher::parse_git_source_resolved(git_url, proxy_url);
+
+    // An explicit flag wins over whatever the URL encodes. `--subpath ""` is the
+    // caller saying "the skill is at the repo root", which is distinct from
+    // omitting the flag and letting the URL decide.
+    let branch = branch.map(str::to_string).or_else(|| parsed.branch.clone());
+    let subpath = match subpath {
+        Some("") => None,
+        Some(value) => Some(value.to_string()),
+        None => parsed.subpath.clone(),
+    };
+
+    let remote_revision =
+        git_fetcher::resolve_remote_revision(&parsed.clone_url, branch.as_deref(), proxy_url)
+            .map_err(|e| AppError::git(e.to_string()))?;
+
+    let temp_dir =
+        git_fetcher::clone_repo_ref(&parsed.clone_url, branch.as_deref(), None, proxy_url)
+            .map_err(AppError::classify_git_error)?;
+
+    // Nothing before this point has written to the store, so a failure during
+    // the network phase leaves no state to unwind — in particular the skill is
+    // never left stuck in `updating`.
+    let marked_updating = std::cell::Cell::new(false);
+    let source_committed = std::cell::Cell::new(false);
+    let outcome = (|| -> Result<(String, bool), AppError> {
+        git_fetcher::checkout_revision(&temp_dir, &remote_revision).map_err(AppError::git)?;
+        let skill_dir = resolve_repoint_skill_dir(&temp_dir, subpath.as_deref())?;
+        let resolved_subpath = git_fetcher::relative_subpath(&temp_dir, &skill_dir);
+
+        let new_hash =
+            crate::core::content_hash::hash_directory(&skill_dir).map_err(AppError::io)?;
+        let content_changed = skill.content_hash.as_deref() != Some(new_hash.as_str());
+
+        // Report before refusing: inspecting a skill whose content differs is
+        // exactly what --dry-run is for, so it must not need --force to run.
+        if dry_run {
+            return Ok((resolved_subpath.unwrap_or_default(), content_changed));
+        }
+        if content_changed && !force {
+            return Err(AppError::invalid_input(
+                "New source content differs from the current library copy; \
+                 re-run with --dry-run to inspect, or --force to overwrite",
+            ));
+        }
+
+        let _lock = RepoLock::acquire_foreground("set skill source").map_err(AppError::db)?;
+
+        // The clone happened outside the lock, so the skill may have been
+        // removed or re-pointed meanwhile. Re-read and refuse to apply a
+        // decision made against a stale snapshot.
+        let current = store
+            .get_skill_by_id(skill_id)
+            .map_err(AppError::db)?
+            .ok_or_else(|| AppError::not_found("Skill was removed while fetching the source"))?;
+        if current.central_path != skill.central_path
+            || current.content_hash != skill.content_hash
+            || current.source_type != skill.source_type
+            || current.source_ref != skill.source_ref
+        {
+            return Err(AppError::invalid_input(
+                "Skill changed while fetching the source; re-run the command",
+            ));
+        }
+
+        store
+            .update_skill_update_status(skill_id, "updating")
+            .map_err(AppError::db)?;
+        marked_updating.set(true);
+
+        // Identical content needs no file work — swapping would rewrite the
+        // central copy for a metadata-only change, and `installer` does not
+        // copy exactly the set of files `content_hash` covers, so the rewrite
+        // could alter files while still reporting `content_changed: false`.
+        let description = if content_changed {
+            let staged_path = staged_path_for(&skill.central_path);
+            let install_result =
+                installer::install_skill_dir_to_destination(&skill_dir, &skill.name, &staged_path)
+                    .inspect_err(|_| {
+                        let _ = std::fs::remove_dir_all(&staged_path);
+                    })
+                    .map_err(AppError::io)?;
+            swap_skill_directory(&staged_path, Path::new(&skill.central_path))?;
+            install_result.description
+        } else {
+            skill.description.clone()
+        };
+
+        store
+            .update_skill_after_reinstall(
+                &skill.id,
+                &skill.name,
+                description.as_deref(),
+                "git",
+                Some(&parsed.original_url),
+                Some(&parsed.clone_url),
+                resolved_subpath.as_deref(),
+                branch.as_deref(),
+                Some(&remote_revision),
+                Some(&remote_revision),
+                Some(&new_hash),
+                "up_to_date",
+            )
+            .map_err(AppError::db)?;
+        source_committed.set(true);
+        resync_copy_targets(store, &skill.id)?;
+        sync_metadata::write_all_from_db_unlocked(store).map_err(AppError::db)?;
+        Ok((resolved_subpath.unwrap_or_default(), content_changed))
+    })();
+
+    git_fetcher::cleanup_temp(&temp_dir);
+
+    match outcome {
+        Ok((resolved_subpath, content_changed)) => Ok(SetSourceResult {
+            skill_id: skill.id,
+            name: skill.name,
+            previous_source_type: skill.source_type,
+            previous_source_ref: skill.source_ref,
+            clone_url: parsed.clone_url,
+            subpath: (!resolved_subpath.is_empty()).then_some(resolved_subpath),
+            branch,
+            revision: remote_revision,
+            content_changed,
+            dry_run,
+        }),
+        Err(e) => {
+            // Only clear `updating` if this call actually set it. A refusal
+            // (bad subpath, content differs without --force) touched nothing,
+            // so marking the skill as errored would be a lie.
+            //
+            // `update_skill_check_state` always writes the revision column, so
+            // it has to be given the one that matches whichever source the row
+            // now describes: the new source's revision once the re-point
+            // committed, otherwise the revision the old source already had.
+            // Passing the newly resolved revision unconditionally would file a
+            // commit from the new repo under a skill still pointing at the old
+            // one; passing None would blank a revision that is still valid.
+            if marked_updating.get() {
+                let revision = if source_committed.get() {
+                    Some(remote_revision.as_str())
+                } else {
+                    skill.remote_revision.as_deref()
+                };
+                let _ = store.update_skill_check_state(
+                    skill_id,
+                    revision,
+                    "error",
+                    Some(&e.message),
+                );
+            }
+            Err(e)
+        }
+    }
+}
+
 pub fn reimport_local_skill_internal(
     store: &SkillStore,
     skill_id: &str,
@@ -2206,19 +2457,64 @@ pub fn validate_clone_temp_path(temp_dir: &str) -> Result<PathBuf, AppError> {
     Err(AppError::invalid_input("Invalid temp directory"))
 }
 
+/// Resolve which directory of a fresh checkout holds the skill.
+///
+/// Both inputs are attacker-reachable. `subpath` comes from the path segment of
+/// a `…/tree/<branch>/<path>` URL the user pasted, and `skill_id` from the part
+/// after `@` in a skills.sh shorthand, which `parse_skillssh_shorthand` does not
+/// constrain to a single path segment. `Path::join` returns an absolute argument
+/// verbatim and `..` segments climb out of the checkout, so both are checked for
+/// containment: without that, `install` copies the resolved directory into the
+/// library — which for a git-backed library can then be pushed to the user's
+/// backup remote.
+///
+/// A subpath that stays inside the checkout but does not exist is a different
+/// case: it is only recoverable when a skills.sh locator can find the skill by
+/// id, which is how a skill that moved upstream is picked up again (#278).
+/// Without a locator, falling through to repo-wide discovery would install or
+/// update whatever that discovery happens to return — in a repository that
+/// groups its skills, the entire `skills/` container.
 pub fn resolve_skill_dir(
     repo_dir: &Path,
     subpath: Option<&str>,
     skill_id: Option<&str>,
 ) -> Result<PathBuf, AppError> {
     if let Some(subpath) = subpath {
-        let path = repo_dir.join(subpath);
-        if path.exists() && path.is_dir() {
-            return Ok(path);
+        let candidate = repo_dir.join(subpath);
+        if !path_guard::is_path_safe(repo_dir, &candidate) {
+            return Err(AppError::invalid_input(format!(
+                "Path '{subpath}' resolves outside the repository"
+            )));
+        }
+        // With a locator to fall back on, the stored path is only taken when it
+        // still holds a skill. An upstream reorganization can leave the path
+        // occupied by a container or an unrelated directory, and copying that
+        // over the installed skill is the same mistake as guessing — let the
+        // locator look the skill up at its new home instead.
+        let usable = if skill_id.is_some() {
+            is_valid_skill_dir(&candidate)
+        } else {
+            candidate.is_dir()
+        };
+        if usable {
+            return Ok(candidate);
+        }
+        if skill_id.is_none() {
+            return Err(AppError::not_found(format!(
+                "Path '{subpath}' does not exist in the repository"
+            )));
         }
     }
 
-    git_fetcher::find_skill_dir(repo_dir, skill_id).map_err(AppError::git)
+    // `find_skill_dir` joins the locator id onto the checkout in several places
+    // before falling back to a recursive search, so its answer is checked too.
+    let resolved = git_fetcher::find_skill_dir(repo_dir, skill_id).map_err(AppError::git)?;
+    if !path_guard::is_path_safe(repo_dir, &resolved) {
+        return Err(AppError::invalid_input(
+            "Resolved skill directory is outside the repository",
+        ));
+    }
+    Ok(resolved)
 }
 
 pub fn resolve_skillssh_install_target(
@@ -2310,10 +2606,16 @@ pub fn resync_copy_targets(store: &SkillStore, skill_id: &str) -> Result<(), App
             continue;
         }
 
+        // Recorded: this walks existing rows, so each path is one we wrote.
+        // The row's mode is filtered to "copy" above, and sync_engine still
+        // refuses if what is on disk no longer matches that record.
         sync_engine::sync_skill(
             &source,
             Path::new(&target.target_path),
             sync_engine::SyncMode::Copy,
+            sync_engine::ReplacePolicy::Recorded {
+                mode: target.mode.as_str(),
+            },
         )
         .map_err(AppError::io)?;
 
@@ -2350,20 +2652,31 @@ pub async fn set_skill_tags(
         tags
     );
     let store = store.inner().clone();
-    let skill_id_for_log = skill_id.clone();
-    let result = tauri::async_runtime::spawn_blocking(move || {
-        sync_metadata::with_repo_lock("set skill tags", || {
-            store.set_tags_for_skill(&skill_id, &tags)?;
-            sync_metadata::ensure_skill_metadata_unlocked(&store, &skill_id)
-        })
-        .map_err(AppError::db)
-    })
-    .await?;
-    match &result {
-        Ok(()) => log::info!("[set_skill_tags] OK skill_id={skill_id_for_log}"),
-        Err(e) => log::error!("[set_skill_tags] FAIL skill_id={skill_id_for_log} err={e}"),
+    tauri::async_runtime::spawn_blocking(move || set_skill_tags_internal(&store, &skill_id, &tags))
+        .await?
+}
+
+/// Shared implementation for GUI and CLI tag writes. Keeping the DB row and
+/// its backup metadata under one repo lock prevents another process from
+/// reindexing the half-written state between those two operations.
+pub fn set_skill_tags_internal(
+    store: &SkillStore,
+    skill_id: &str,
+    tags: &[String],
+) -> Result<(), AppError> {
+    let mut normalized = Vec::new();
+    for tag in tags {
+        let tag = tag.trim();
+        if !tag.is_empty() && !normalized.iter().any(|existing| existing == tag) {
+            normalized.push(tag.to_string());
+        }
     }
-    result
+
+    sync_metadata::with_repo_lock("set skill tags", || {
+        store.set_tags_for_skill(skill_id, &normalized)?;
+        sync_metadata::ensure_skill_metadata_unlocked(store, skill_id)
+    })
+    .map_err(AppError::db)
 }
 
 /// Globally rename a tag across all skills (used by the tag filter bar). If the
@@ -2376,40 +2689,55 @@ pub async fn rename_tag(
 ) -> Result<(), AppError> {
     let store = store.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
-        let new_name = new_name.trim().to_string();
-        if new_name.is_empty() {
-            return Err(AppError::invalid_input("Tag name cannot be empty"));
-        }
-        if new_name == old_name {
-            return Ok(());
-        }
-        sync_metadata::with_repo_lock("rename tag", || {
-            let affected = store.rename_tag(&old_name, &new_name)?;
-            for skill_id in &affected {
-                sync_metadata::ensure_skill_metadata_unlocked(&store, skill_id)?;
-            }
-            Ok(())
-        })
-        .map_err(AppError::db)
+        rename_tag_internal(&store, &old_name, &new_name).map(|_| ())
     })
     .await?
+}
+
+pub fn rename_tag_internal(
+    store: &SkillStore,
+    old_name: &str,
+    new_name: &str,
+) -> Result<Vec<String>, AppError> {
+    let old_name = old_name.trim();
+    let new_name = new_name.trim();
+    if old_name.is_empty() || new_name.is_empty() {
+        return Err(AppError::invalid_input("Tag name cannot be empty"));
+    }
+    if new_name == old_name {
+        return Ok(Vec::new());
+    }
+    sync_metadata::with_repo_lock("rename tag", || {
+        let affected = store.rename_tag(old_name, new_name)?;
+        for skill_id in &affected {
+            sync_metadata::ensure_skill_metadata_unlocked(store, skill_id)?;
+        }
+        Ok(affected)
+    })
+    .map_err(AppError::db)
 }
 
 /// Globally delete a tag from all skills (used by the tag filter bar).
 #[tauri::command]
 pub async fn delete_tag(name: String, store: State<'_, Arc<SkillStore>>) -> Result<(), AppError> {
     let store = store.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || {
-        sync_metadata::with_repo_lock("delete tag", || {
-            let affected = store.delete_tag(&name)?;
-            for skill_id in &affected {
-                sync_metadata::ensure_skill_metadata_unlocked(&store, skill_id)?;
-            }
-            Ok(())
-        })
-        .map_err(AppError::db)
+    tauri::async_runtime::spawn_blocking(move || delete_tag_internal(&store, &name).map(|_| ()))
+        .await?
+}
+
+pub fn delete_tag_internal(store: &SkillStore, name: &str) -> Result<Vec<String>, AppError> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Err(AppError::invalid_input("Tag name cannot be empty"));
+    }
+    sync_metadata::with_repo_lock("delete tag", || {
+        let affected = store.delete_tag(name)?;
+        for skill_id in &affected {
+            sync_metadata::ensure_skill_metadata_unlocked(store, skill_id)?;
+        }
+        Ok(affected)
     })
-    .await?
+    .map_err(AppError::db)
 }
 
 #[tauri::command]
@@ -2752,7 +3080,11 @@ mod tests {
             source("https://github.com/mattpocock/skills.git", None, None),
             source("https://github.com/vercel/ai.git", None, None),
             // Same repo, different branch → must NOT collapse with the None-branch group.
-            source("https://github.com/mattpocock/skills.git", Some("next"), None),
+            source(
+                "https://github.com/mattpocock/skills.git",
+                Some("next"),
+                None,
+            ),
         ];
         for s in skills {
             *per_remote.entry(RemoteKey::from(s)).or_insert(0) += 1;
@@ -2790,8 +3122,9 @@ mod tests {
     #[test]
     fn resolve_concurrent_resolves_every_remote_exactly_once() {
         use std::sync::atomic::{AtomicUsize, Ordering};
-        let remotes: Vec<RemoteKey> =
-            (0..20).map(|i| remote(&format!("https://example.test/r{i}"), None)).collect();
+        let remotes: Vec<RemoteKey> = (0..20)
+            .map(|i| remote(&format!("https://example.test/r{i}"), None))
+            .collect();
         let calls = AtomicUsize::new(0);
 
         let out = resolve_concurrent(remotes.clone(), |key| {
@@ -2799,7 +3132,11 @@ mod tests {
             Ok(format!("rev:{}", key.clone_url))
         });
 
-        assert_eq!(calls.load(Ordering::Relaxed), remotes.len(), "each remote resolved exactly once");
+        assert_eq!(
+            calls.load(Ordering::Relaxed),
+            remotes.len(),
+            "each remote resolved exactly once"
+        );
         assert_eq!(out.len(), remotes.len());
         for key in &remotes {
             assert!(matches!(out.get(key), Some(Ok(v)) if *v == format!("rev:{}", key.clone_url)));
@@ -2833,8 +3170,7 @@ mod tests {
     #[test]
     fn resolve_concurrent_runs_remotes_in_parallel() {
         use std::sync::atomic::{AtomicUsize, Ordering};
-        let remotes: Vec<RemoteKey> =
-            (0..8).map(|i| remote(&format!("r{i}"), None)).collect();
+        let remotes: Vec<RemoteKey> = (0..8).map(|i| remote(&format!("r{i}"), None)).collect();
         let in_flight = AtomicUsize::new(0);
         let peak = AtomicUsize::new(0);
 
@@ -2911,9 +3247,15 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(dto.update_status, "unknown", "status left for the next round");
+        assert_eq!(
+            dto.update_status, "unknown",
+            "status left for the next round"
+        );
         let stored = repo.store.get_skill_by_id("skill-1").unwrap().unwrap();
-        assert_eq!(stored.remote_revision, None, "no revision from a stale remote");
+        assert_eq!(
+            stored.remote_revision, None,
+            "no revision from a stale remote"
+        );
         assert_eq!(stored.last_checked_at, None, "the check did not complete");
     }
 
@@ -2960,5 +3302,268 @@ mod tests {
         assert_eq!(dto.update_status, "unknown");
         let stored = repo.store.get_skill_by_id("skill-1").unwrap().unwrap();
         assert_eq!(stored.last_checked_at, None, "no network, no write");
+    }
+
+    fn write_skill(dir: &Path, name: &str) {
+        fs::create_dir_all(dir).unwrap();
+        fs::write(
+            dir.join("SKILL.md"),
+            format!("---\nname: {name}\ndescription: d\n---\nbody\n"),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn repoint_accepts_a_valid_subpath() {
+        let tmp = tempdir().unwrap();
+        let repo = tmp.path();
+        write_skill(&repo.join("note-manager"), "note-manager");
+
+        let resolved = resolve_repoint_skill_dir(repo, Some("note-manager")).unwrap();
+        assert_eq!(resolved, repo.join("note-manager"));
+    }
+
+    #[test]
+    fn repoint_accepts_repo_root_when_it_is_a_skill() {
+        let tmp = tempdir().unwrap();
+        write_skill(tmp.path(), "root-skill");
+
+        let resolved = resolve_repoint_skill_dir(tmp.path(), None).unwrap();
+        assert_eq!(resolved, tmp.path());
+    }
+
+    #[test]
+    fn repoint_rejects_repo_root_without_skill_md() {
+        let tmp = tempdir().unwrap();
+        fs::create_dir_all(tmp.path().join("some-dir")).unwrap();
+
+        let err = resolve_repoint_skill_dir(tmp.path(), None).unwrap_err();
+        assert!(
+            err.message.contains("not a skill directory"),
+            "{}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn repoint_rejects_missing_subpath_instead_of_falling_back() {
+        let tmp = tempdir().unwrap();
+        let repo = tmp.path();
+        // A real skill exists elsewhere: the lenient resolver would discover it.
+        write_skill(&repo.join("other"), "other");
+
+        let err = resolve_repoint_skill_dir(repo, Some("typo")).unwrap_err();
+        assert!(err.message.contains("does not exist"), "{}", err.message);
+    }
+
+    #[test]
+    fn repoint_rejects_subpath_that_is_not_a_skill_dir() {
+        let tmp = tempdir().unwrap();
+        let repo = tmp.path();
+        fs::create_dir_all(repo.join("docs")).unwrap();
+
+        let err = resolve_repoint_skill_dir(repo, Some("docs")).unwrap_err();
+        assert!(
+            err.message.contains("not a skill directory"),
+            "{}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn repoint_rejects_absolute_subpath() {
+        let tmp = tempdir().unwrap();
+        let outside = tmp.path().join("outside");
+        write_skill(&outside, "outside");
+        let repo = tmp.path().join("repo");
+        fs::create_dir_all(&repo).unwrap();
+
+        // `Path::join` returns an absolute argument verbatim, so without the
+        // guard this would install a directory from outside the checkout.
+        let err = resolve_repoint_skill_dir(&repo, Some(outside.to_str().unwrap())).unwrap_err();
+        assert!(
+            err.message.contains("outside the repository"),
+            "{}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn repoint_rejects_parent_traversal_subpath() {
+        let tmp = tempdir().unwrap();
+        write_skill(&tmp.path().join("outside"), "outside");
+        let repo = tmp.path().join("repo");
+        fs::create_dir_all(&repo).unwrap();
+
+        let err = resolve_repoint_skill_dir(&repo, Some("../outside")).unwrap_err();
+        assert!(
+            err.message.contains("outside the repository"),
+            "{}",
+            err.message
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn repoint_rejects_symlink_escaping_the_checkout() {
+        let tmp = tempdir().unwrap();
+        let outside = tmp.path().join("outside");
+        write_skill(&outside, "outside");
+        let repo = tmp.path().join("repo");
+        fs::create_dir_all(&repo).unwrap();
+        std::os::unix::fs::symlink(&outside, repo.join("link")).unwrap();
+
+        let err = resolve_repoint_skill_dir(&repo, Some("link")).unwrap_err();
+        assert!(
+            err.message.contains("outside the repository"),
+            "{}",
+            err.message
+        );
+    }
+
+    // ── resolve_skill_dir: install / update / preview resolution ───────────
+    //
+    // Both inputs reach this from a URL the user pasted. The cases below are
+    // the ones that let a crafted or merely wrong URL resolve to something the
+    // caller did not ask for.
+
+    #[test]
+    fn resolve_accepts_a_subpath_inside_the_checkout() {
+        let tmp = tempdir().unwrap();
+        write_skill(&tmp.path().join("skills").join("pdf"), "pdf");
+
+        let resolved = resolve_skill_dir(tmp.path(), Some("skills/pdf"), None).unwrap();
+        assert_eq!(resolved, tmp.path().join("skills").join("pdf"));
+    }
+
+    #[test]
+    fn resolve_still_returns_a_container_for_enumeration() {
+        // preview/confirm install walk a container to list the skills inside
+        // it, so an existing non-skill directory must keep resolving.
+        let tmp = tempdir().unwrap();
+        write_skill(&tmp.path().join("skills").join("pdf"), "pdf");
+        write_skill(&tmp.path().join("skills").join("docx"), "docx");
+
+        let resolved = resolve_skill_dir(tmp.path(), Some("skills"), None).unwrap();
+        assert_eq!(resolved, tmp.path().join("skills"));
+        // What preview/confirm actually do with that container.
+        assert_eq!(collect_git_skill_dirs(&resolved).len(), 2);
+    }
+
+    #[test]
+    fn resolve_rejects_parent_traversal_with_and_without_a_locator() {
+        let tmp = tempdir().unwrap();
+        write_skill(&tmp.path().join("outside"), "outside");
+        let repo = tmp.path().join("repo");
+        fs::create_dir_all(&repo).unwrap();
+
+        // A locator must not soften the traversal check: the escaping path is
+        // refused either way, never quietly ignored in favour of discovery.
+        for locator in [None, Some("outside")] {
+            let err = resolve_skill_dir(&repo, Some("../outside"), locator).unwrap_err();
+            assert!(
+                err.message.contains("outside the repository"),
+                "locator {locator:?}: {}",
+                err.message
+            );
+        }
+    }
+
+    #[test]
+    fn resolve_rejects_absolute_subpath() {
+        let tmp = tempdir().unwrap();
+        let outside = tmp.path().join("outside");
+        write_skill(&outside, "outside");
+        let repo = tmp.path().join("repo");
+        fs::create_dir_all(&repo).unwrap();
+
+        let err =
+            resolve_skill_dir(&repo, Some(outside.to_str().unwrap()), None).unwrap_err();
+        assert!(
+            err.message.contains("outside the repository"),
+            "{}",
+            err.message
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resolve_rejects_subpath_symlinked_out_of_the_checkout() {
+        let tmp = tempdir().unwrap();
+        let outside = tmp.path().join("outside");
+        write_skill(&outside, "outside");
+        let repo = tmp.path().join("repo");
+        fs::create_dir_all(&repo).unwrap();
+        std::os::unix::fs::symlink(&outside, repo.join("link")).unwrap();
+
+        let err = resolve_skill_dir(&repo, Some("link"), None).unwrap_err();
+        assert!(
+            err.message.contains("outside the repository"),
+            "{}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn resolve_rejects_a_locator_that_escapes_the_checkout() {
+        // `owner/repo@../../x` survives parse_skillssh_shorthand, which only
+        // checks the owner/repo half, so the locator itself can climb out.
+        let tmp = tempdir().unwrap();
+        write_skill(&tmp.path().join("outside"), "outside");
+        let repo = tmp.path().join("repo");
+        fs::create_dir_all(&repo).unwrap();
+
+        let err = resolve_skill_dir(&repo, None, Some("../outside")).unwrap_err();
+        assert!(
+            err.message.contains("outside the repository"),
+            "{}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn resolve_refuses_a_missing_subpath_instead_of_discovering_the_container() {
+        // The measured bug: a tree URL naming a directory that does not exist
+        // installed the whole `skills/` container as one skill.
+        let tmp = tempdir().unwrap();
+        write_skill(&tmp.path().join("skills").join("pdf"), "pdf");
+
+        let err = resolve_skill_dir(tmp.path(), Some("artifacts-builder"), None).unwrap_err();
+        assert!(err.message.contains("does not exist"), "{}", err.message);
+    }
+
+    #[test]
+    fn resolve_lets_a_locator_recover_a_skill_that_moved_upstream() {
+        // #278's recovery path: the stored subpath is stale because upstream
+        // reorganized, and the locator finds the skill at its new home.
+        let tmp = tempdir().unwrap();
+        write_skill(&tmp.path().join("skills").join("db"), "db");
+
+        let resolved = resolve_skill_dir(tmp.path(), Some("db"), Some("db")).unwrap();
+        assert_eq!(resolved, tmp.path().join("skills").join("db"));
+    }
+
+    #[test]
+    fn resolve_lets_a_locator_override_a_path_that_is_no_longer_the_skill() {
+        // The harder half of a reorganization: the stored path still exists,
+        // but upstream turned it into a container and moved the skill. Taking
+        // the path would copy the container over the installed skill.
+        let tmp = tempdir().unwrap();
+        fs::create_dir_all(tmp.path().join("db")).unwrap();
+        write_skill(&tmp.path().join("db").join("nested"), "nested");
+        write_skill(&tmp.path().join("skills").join("db"), "db");
+
+        let resolved = resolve_skill_dir(tmp.path(), Some("db"), Some("db")).unwrap();
+        assert_eq!(resolved, tmp.path().join("skills").join("db"));
+    }
+
+    #[test]
+    fn resolve_errors_when_the_locator_finds_nothing() {
+        // Still #278: no match must not fall through to a container or root.
+        let tmp = tempdir().unwrap();
+        write_skill(&tmp.path().join("skills").join("db"), "db");
+
+        let err = resolve_skill_dir(tmp.path(), Some("gone"), Some("nope-not-here")).unwrap_err();
+        assert!(err.message.contains("not found"), "{}", err.message);
     }
 }

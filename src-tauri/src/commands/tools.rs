@@ -108,25 +108,38 @@ pub async fn set_tool_enabled(
 ) -> Result<(), AppError> {
     let store = store.inner().clone();
     let result = tauri::async_runtime::spawn_blocking(move || {
-        let mut disabled = get_disabled_tools(&store);
-        if enabled {
-            disabled.retain(|k| k != &key);
-            set_disabled_tools(&store, &disabled)?;
-            sync_active_scenario_to_tool(&store, &key);
-            Ok(())
-        } else {
-            if !disabled.contains(&key) {
-                disabled.push(key.clone());
-            }
-            unsync_all_for_tool(&store, &key);
-            set_disabled_tools(&store, &disabled)
-        }
+        set_tool_enabled_internal(&store, &key, enabled)
     })
     .await?;
     if result.is_ok() {
         refresh_tray_menu_best_effort(&app);
     }
     result
+}
+
+/// Shared GUI/CLI implementation for the global agent toggle.
+pub fn set_tool_enabled_internal(
+    store: &SkillStore,
+    key: &str,
+    enabled: bool,
+) -> Result<(), AppError> {
+    if tool_adapters::find_adapter_with_store(store, key).is_none() {
+        return Err(AppError::not_found(format!("Unknown agent: {key}")));
+    }
+
+    let mut disabled = get_disabled_tools(store);
+    if enabled {
+        disabled.retain(|item| item != key);
+        set_disabled_tools(store, &disabled)?;
+        sync_active_scenario_to_tool(store, key);
+        Ok(())
+    } else {
+        if !disabled.iter().any(|item| item == key) {
+            disabled.push(key.to_string());
+        }
+        unsync_all_for_tool(store, key);
+        set_disabled_tools(store, &disabled)
+    }
 }
 
 #[tauri::command]
@@ -141,7 +154,16 @@ pub async fn set_all_tools_enabled(
             set_disabled_tools(&store, &[])?;
             // Re-sync active scenario skills to all (now-enabled) installed tools
             if let Ok(Some(active_id)) = store.get_active_scenario_id() {
-                sync_scenario_skills(&store, &active_id).ok();
+                // Enabling the tools succeeded either way; a target we may not
+                // replace is reported, not fatal (#363).
+                match sync_scenario_skills(&store, &active_id) {
+                    Ok(refusals) => {
+                        for refusal in refusals {
+                            log::warn!("enable-all-tools sync skipped a target: {refusal}");
+                        }
+                    }
+                    Err(e) => log::warn!("enable-all-tools sync failed: {e}"),
+                }
             }
             Ok(())
         } else {

@@ -17,6 +17,95 @@ _Nothing yet._
 ### Developer & Governance
 _Nothing yet._
 
+## [1.33.1] - 2026-08-12
+
+### Release Overview
+- Security fix: a crafted git URL could make an install copy a directory from outside the cloned repository into your library. Update if you install skills from links other people share.
+
+### User-facing
+- **Installing from a git URL can no longer reach outside the repository** — The path part of a `…/tree/<branch>/<path>` URL was joined onto the clone without checking that it stayed inside it, so a URL whose path climbed far enough resolved to an arbitrary directory on your machine, which was then copied into the library and reported as a successful install. Because the library can be backed up to a git remote, content pulled in this way could also leave the machine. The same applies to a skills.sh shorthand whose `@` part contains a path. Both are now refused. This affected the desktop app and the CLI equally.
+- **A git URL pointing at a directory that does not exist is now an error** — It used to fall back to searching the whole repository, which for a repository that groups its skills installed the entire `skills/` container as a single entry. Installing `…/tree/main/artifacts-builder` from a repo whose real path is `skills/web-artifacts-builder` now says so instead of quietly installing 17 unrelated skills as one.
+- **Updates no longer substitute a different directory when a skill moves upstream** — If a skills.sh skill's recorded path was taken over by a container or an unrelated directory, an update copied that over your installed skill. The recorded path is now used only when it still holds a skill; otherwise the skill is looked up at its new home, as it already was when the path disappeared entirely.
+
+### Developer & Governance
+- `resolve_skill_dir` validates both the requested subpath and the directory finally resolved by `find_skill_dir` with `path_guard::is_path_safe`, covering the locator route as well: `parse_skillssh_shorthand` does not constrain the part after `@` to a single path segment, and `find_skill_dir` joins that id onto the checkout in three places.
+- 10 regression tests: `..`, absolute-path and symlink escapes with and without a locator; a missing path with no locator; locator recovery after an upstream move; a locator finding nothing (preserving the #278 assertions); and container enumeration for the preview/confirm install flow.
+## [1.33.0] - 2026-08-12
+
+### Release Overview
+- A skill you wrote locally and later published to git can now be pointed at that repository without being reinstalled, so it starts receiving updates while keeping its tags, presets and deployments.
+
+### User-facing
+- **`skills set-source` re-points an installed skill at a git source in place** — Converting a local skill to a git-backed one previously had no safe path: `install` allocates `<name>-2` and leaves you with a duplicate, `remove` + `install` drops the skill id and with it the tags, preset membership and per-agent deployments, and the desktop app's relink is local-to-local only. The new command updates the skill in place, so everything keyed to its id survives and `update` works from then on.
+- **The re-point refuses to guess** — A `--subpath` that does not exist, is not a skill directory, or resolves outside the checkout is an error, never a silent fallback to scanning the whole repository. `--dry-run` reports what would change without needing `--force`, and content that differs from the library copy is only overwritten with `--force`.
+
+### Developer & Governance
+- `set_git_source_internal` reuses `update_skill_after_reinstall`, so the row is updated by id. The clone runs outside the repo lock and the row is re-read after locking, refusing to apply a decision made against a stale snapshot; identical content skips file work entirely rather than rewriting the central copy for a metadata-only change.
+- Strict subpath resolution is guarded by `path_guard::is_path_safe`, covering absolute paths, `..` traversal and symlinks escaping the checkout, with 7 unit tests.
+- CI: publishing a release now triggers a rebuild of skillsmanager.dev.
+- Documentation: `skills set-source` in both READMEs; demo screenshots refreshed for the 1.32 UI.
+## [1.32.0] - 2026-08-11
+
+### Release Overview
+- Deploying a skill can no longer delete a directory Skills Manager did not create. Every write to an Agent directory now has to prove the target is ours before replacing it, and anything it cannot vouch for is left untouched and reported.
+
+### User-facing
+- **Deployment refuses to overwrite content that is not ours (#363)** — A skill whose name collides with a directory you created yourself was silently deleted, and the operation reported success. Deployment now replaces only an absent target, a link already pointing at the skill, or a deployment the app has a record of. Anything else is left byte-for-byte intact and the reason is shown. Adopt the existing directory into the library, or move it aside, to continue.
+- **`skills export --dest` no longer wipes the destination** — Exporting to a path that already existed deleted it recursively; `--dest ~/Documents` left nothing but a `SKILL.md`. A non-empty destination is now refused, with `--force` to overwrite deliberately.
+- **Turning a skill off keeps content that replaced it** — Undeploy, preset switching, and the Agent toggle deleted whatever the app's records pointed at. If you had replaced a managed skill with your own directory, that directory is now preserved and reported instead of deleted.
+- **Failures explain themselves** — Adding skills from the library, or applying a preset, used to report only "N skills failed". The affected path, the reason, and what to do about it now appear in the message.
+- **Switching an already-deployed skill from symlink to copy mode works** — It previously failed every time with a spurious "infinite recursion" error.
+
+### Developer & Governance
+- `sync_engine::sync_skill` takes an explicit `ReplacePolicy` (`NoClobber` / `Recorded { mode }` / `UserConfirmed`), so all nine call sites must state what they are authorized to destroy. Removal is type-specific, closing the window where an object swapped in after the check could be recursively deleted.
+- Batch deployment preflights every pair before writing anything and pools ownership evidence per target path, so Agents sharing one skills directory deploy correctly while contradictory records refuse.
+- Ownership refusals are reported rather than thrown from `sync_desired_targets`; startup logs them and cannot be blocked from launching by a collision, while explicit user actions surface them as errors.
+- 17 regression tests covering the authorization table, startup behavior, shared skills directories, contradictory records, and preservation on undeploy.
+- Documentation: link the official site at skillsmanager.dev, and correct the supported agent count to 51.
+## [1.31.0] - 2026-08-09
+
+### Release Overview
+- Skills Manager now ships an agent-ready CLI that can manage the shared library, real per-agent deployments, presets, tags, and Agent availability without driving the desktop UI.
+
+### User-facing
+- **Claude Code, Codex, and other agents can manage Skills Manager directly** — The CLI can list and filter skills, inspect deployment status, deploy or undeploy one or several skills, enable or disable Agents, and create, edit, delete, inspect, deploy, or undeploy presets. Tag operations now include set, rename, and guarded deletion.
+- **Preset deployment is additive** — Several presets can be deployed at the same time. Creating a preset or changing its members only organizes the library; it never changes Agent files implicitly. `presets undeploy` without an Agent removes the preset everywhere it actually has target records, including disabled, uninstalled, or no-longer-registered custom Agents.
+- **Automation has safer, machine-readable behavior** — `--json` returns stable error codes, bulk destructive operations support `--dry-run`, preset membership updates are atomic, and deployment commands verify the resulting database rows and filesystem state before reporting success. Successful pairs in a partially failed batch are still recorded accurately.
+- **Standalone CLI downloads join every release** — Release assets now include `skills-manager-cli` binaries for macOS arm64/x64, Windows x64, and Linux x64. The macOS binaries are Developer ID signed with the hardened runtime and accepted by Apple's notarization service.
+
+### Developer & Governance
+- Preset CRUD and membership, tag mutation, and Agent toggles now expose shared internal implementations used by both Tauri commands and the CLI. The desktop app keeps its existing active-preset transitions while CLI organization commands remain side-effect-free.
+- Deployment selection and verification use actual `skill_targets` rows when removing files, so stale deployments remain discoverable after an Agent is disabled or removed. Audits are emitted only for verified pairs that really changed, including successful pairs before a partial-failure response.
+- The release workflow builds the Rust CLI for all four target triples, gives every asset a collision-free platform name, imports the Developer ID certificate into an isolated temporary keychain for standalone macOS CLI signing, verifies the signing identity and hardened runtime, requires an explicit `Accepted` notarization status, and refuses to publish a draft missing any CLI or updater artifact. `release:prepare` now keeps Cargo package and lockfile versions aligned with the app version.
+- The bundled `manage-skills` skill and both READMEs document the CLI installation paths, state model, safe workflows, and the difference between disabling an Agent, undeploying a skill, and undeploying a preset.
+
+## [1.30.0] - 2026-08-07
+
+### Release Overview
+- macOS can now install updates from inside the app, and every platform tells you when a new version exists. Updating stays a decision you make: nothing is ever downloaded or installed on its own.
+- The agent list in Settings leads with the agents actually found on your machine instead of a hand-kept "mainstream" list.
+
+### User-facing
+- **In-app updates on macOS** — When an update is available, Settings offers **Install Update** instead of only a link to GitHub. This became possible once builds were signed with a Developer ID certificate and notarized, because the replacement bundle now carries a signature macOS keeps trusting. The **Download** link stays alongside it for anyone who prefers installing by hand. Linux still links to the release page: only the AppImage can be replaced in place, and a .deb or .rpm install is indistinguishable from it here.
+- **This change first pays off when updating _from_ this release** — Which buttons the update section shows is part of the app you already have installed, so v1.29.0 still sends macOS users to GitHub for this one upgrade. From this release onward, macOS updates happen in place.
+- **A new version now announces itself** — The app checks for a newer version shortly after launch and, if one exists, shows a notification and marks Settings in the sidebar. It only tells you; downloading and installing still require your click. There is no automatic app update, and none is planned. (The separate *Skill* Auto-Update setting is unchanged and still governs skills only.)
+- **Restarting after an update is your call** — Once an update is installed, a notification offers **Restart Now** and waits. Nothing restarts on its own, so an update can never interrupt what you were doing.
+- **Updates work behind a proxy** — The installer now uses the proxy configured in Settings. Previously the version *check* honoured that proxy while the *download* did not, so anyone reaching GitHub through one was told a new version existed and then could not install it.
+- **A clear message instead of a failed update** — Updating from inside a mounted .dmg, or from a copy macOS is running in its quarantine sandbox, cannot work: the replaced app is written somewhere that gets discarded. The app now detects this and asks you to move it to Applications first, rather than downloading the update and failing at the end.
+- **The agent list groups by what you actually have** — Settings used to split agents into "Built-in" and "More Agents" by a hand-kept list, which had drifted: Pi and WorkBuddy sat up top while OpenHands, Cline, Goose and Continue — each far more widely used — were folded away. The split is now **Detected Agents** (found on this machine) and **Other Supported Agents**, so the top of the list is the agents you can actually sync to, and it stays accurate on its own as you install or remove them.
+- **The rest of the list is ordered by how widely used each agent is** — The collapsed section reads as a "what else could I install" list, so it is ranked rather than arbitrary. Your own drag-and-drop ordering still wins wherever you have set one.
+
+### Developer & Governance
+- `restart_app` and `quit_app` share `teardown_before_exit`, so the exit-time local backup commit cannot be skipped by restarting instead of quitting — restarting outright would have silently dropped it.
+- Restart goes through `AppHandle::request_restart` rather than `restart`. On the main thread the latter spawns the replacement process and exits without emitting `RunEvent::Exit`, and `tauri-plugin-single-instance` removes its socket only on that event. The old process normally exits before the new one can connect, but nothing enforces that ordering, and losing the race means the new instance sees a live singleton and exits — taking the app down instead of restarting it.
+- `update_install_blocker` reports only the two states the updater cannot recover from: a Gatekeeper-translocated copy, and an `EROFS` failure when probing the bundle's parent directory. A general writability test was rejected deliberately — a `/Applications` copy owned by another admin account is not writable by this process either, and there the updater's own privileged prompt succeeds.
+- The macOS release job now unpacks the `.app.tar.gz` it produced and runs the full signature, hardened-runtime, staple and `spctl` assertions against the extracted bundle. That archive, not the `.app` or the `.dmg`, is what the updater unpacks over a running install, so it is the artifact whose signature decides whether an updated copy still launches. The assertions were factored into a shared shell function rather than duplicated.
+- The version check and the updater keep separate sources (GitHub Releases API and `latest.json`). Collapsing them onto the updater's `check()` would mean a missing platform entry or a failed updater request reports "you're on the latest version" and hides the download link too.
+- No `tauri-plugin-process` dependency: `AppHandle::restart` is in Tauri core, and the plugin only wraps it for IPC.
+- `MAINSTREAM_AGENT_KEYS` is gone. Grouping now reads `ToolInfo.installed`, which the backend already reported, so nobody has to re-curate a membership list as products rise and fall — the previous one had gone stale within days of being edited.
+- `DEFAULT_PRIORITY_ORDER` grew from 9 entries to a ranked head of 23, measured 2026-08-07 from GitHub stars for the open-source agents and market position for the closed-source ones. The rationale, the numbers and the caveat that stars overstate general-purpose assistants are recorded next to the list, so the next edit starts from evidence rather than impressions. Existing saved orders still take precedence; this only changes what a user who has never dragged sees.
+
+
 ## [1.29.0] - 2026-08-05
 
 ### Release Overview
