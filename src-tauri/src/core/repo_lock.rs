@@ -15,6 +15,13 @@ use super::central_repo;
 /// see issue #99 (os error 5 / "Access is denied").
 const LOCK_FILE_NAME: &str = ".skills-manager.lock";
 
+/// Sidecar file holding a copy of the current holder's stamp. On Windows the
+/// exclusive byte-range lock on the lock file itself makes *any* read of it
+/// from another handle fail with os error 33, so "busy" errors cannot read the
+/// stamp from the lock file while it matters. The sidecar is written unlocked
+/// on every successful acquire; a failed/missing sidecar just means no note.
+const LOCK_INFO_NAME: &str = ".skills-manager.lock.info";
+
 /// How long a user-initiated ("foreground") operation waits for the central
 /// repository lock before giving up with a "busy" error. Background work holds
 /// the lock only briefly per skill, but an auto-backup `git push` can hold it
@@ -23,6 +30,15 @@ const LOCK_FILE_NAME: &str = ".skills-manager.lock";
 /// that happened to collide with a background update check or backup failed
 /// instantly with "skills repository is busy" (issues #196, #220, #232).
 pub const FOREGROUND_WAIT: Duration = Duration::from_secs(20);
+
+/// How long an install flow waits for the central-repository lock before
+/// giving up with a "busy" error. Installs need a much larger budget than
+/// [`FOREGROUND_WAIT`] because the startup reindex can hold the lock for
+/// 40–100s on a cold start, and the install commands tear down their clone
+/// temp directory on return — so a caller-side retry cannot reuse the clone
+/// and would have to fetch it again. The fs2 lock is released by the OS when
+/// the holder exits, so waiting always terminates.
+pub const INSTALL_WAIT: Duration = Duration::from_secs(150);
 
 /// Poll cadence while waiting for the lock. Kept below the yield the background
 /// per-skill loops insert between releases (see `skill_auto_updater` and the
@@ -41,7 +57,7 @@ impl RepoLock {
     pub fn acquire(operation: &str) -> Result<Self> {
         let file = open_lock_file()?;
         file.try_lock_exclusive()
-            .with_context(|| format!("skills repository is busy: {operation}"))?;
+            .with_context(|| format!("skills repository is busy: {operation}{}", holder_note()))?;
         Self::stamp(file, operation)
     }
 
@@ -62,8 +78,9 @@ impl RepoLock {
                 // needs it most.
                 Err(err) => {
                     if start.elapsed() >= timeout {
-                        return Err(err)
-                            .with_context(|| format!("skills repository is busy: {operation}"));
+                        return Err(err).with_context(|| {
+                            format!("skills repository is busy: {operation}{}", holder_note())
+                        });
                     }
                     std::thread::sleep(POLL_INTERVAL);
                 }
@@ -76,11 +93,17 @@ impl RepoLock {
         Self::acquire_blocking(operation, FOREGROUND_WAIT)
     }
 
+    /// Convenience for install flows: wait up to [`INSTALL_WAIT`]. See that
+    /// constant for why installs get a bigger budget than other foreground
+    /// operations.
+    pub fn acquire_install(operation: &str) -> Result<Self> {
+        Self::acquire_blocking(operation, INSTALL_WAIT)
+    }
+
     fn stamp(mut file: File, operation: &str) -> Result<Self> {
         file.set_len(0)?;
         file.seek(SeekFrom::Start(0))?;
-        writeln!(
-            file,
+        let stamp = format!(
             "pid={}\nhostname={}\noperation={}\nstart_time={}",
             std::process::id(),
             std::env::var("HOSTNAME")
@@ -88,8 +111,15 @@ impl RepoLock {
                 .unwrap_or_else(|_| "unknown".to_string()),
             operation,
             chrono::Utc::now().to_rfc3339()
-        )?;
+        );
+        writeln!(file, "{stamp}")?;
         file.sync_all()?;
+        let info_path = central_repo::base_dir().join(LOCK_INFO_NAME);
+        if let Err(err) = std::fs::write(&info_path, stamp) {
+            // The sidecar is best-effort diagnostics for "busy" errors; a
+            // failed write must never fail the acquire itself.
+            log::debug!("failed to write lock info sidecar: {err}");
+        }
         Ok(Self { file })
     }
 }
@@ -104,6 +134,44 @@ fn open_lock_file() -> Result<File> {
         .write(true)
         .open(&lock_path)
         .with_context(|| format!("failed to open repo lock {}", lock_path.display()))
+}
+
+/// Human-readable description of whoever currently holds the lock, appended to
+/// "busy" errors so users and logs can see *what* they are waiting for instead
+/// of a bare operation name. Reads the sidecar copy of the holder's stamp (the
+/// lock file itself cannot be read while locked on Windows); returns an empty
+/// string when the sidecar cannot be read or parsed, never an error.
+fn holder_note() -> String {
+    let info_path = central_repo::base_dir().join(LOCK_INFO_NAME);
+    let raw = match std::fs::read_to_string(&info_path) {
+        Ok(raw) => raw,
+        Err(_) => return String::new(),
+    };
+    let mut operation = None;
+    let mut pid = None;
+    let mut held_for = None;
+    for line in raw.lines() {
+        if let Some(v) = line.strip_prefix("operation=") {
+            operation = Some(v.trim().to_string());
+        } else if let Some(v) = line.strip_prefix("pid=") {
+            pid = Some(v.trim().to_string());
+        } else if let Some(v) = line.strip_prefix("start_time=") {
+            if let Ok(start) = chrono::DateTime::parse_from_rfc3339(v.trim()) {
+                let secs = (chrono::Utc::now() - start.with_timezone(&chrono::Utc))
+                    .num_seconds()
+                    .max(0);
+                held_for = Some(format!(" for {secs}s"));
+            }
+        }
+    }
+    let Some(operation) = operation else {
+        return String::new();
+    };
+    let pid = pid
+        .map(|p| format!(", pid {p}"))
+        .unwrap_or_default();
+    let held_for = held_for.unwrap_or_default();
+    format!(" (held by \"{operation}\"{held_for}{pid})")
 }
 
 impl Drop for RepoLock {
@@ -162,6 +230,18 @@ mod tests {
         let start = Instant::now();
         let busy = RepoLock::acquire_blocking("waiter", Duration::from_millis(300));
         assert!(busy.is_err(), "should time out while the lock is held");
+        let busy_msg = match busy {
+            Err(err) => format!("{err:#}"),
+            Ok(_) => panic!("acquire should have timed out while the lock was held"),
+        };
+        assert!(
+            busy_msg.contains("skills repository is busy: waiter"),
+            "error should name the blocked operation, got: {busy_msg}"
+        );
+        assert!(
+            busy_msg.contains("held by \"holder\""),
+            "error should name the current holder, got: {busy_msg}"
+        );
         assert!(
             start.elapsed() >= Duration::from_millis(250),
             "should have waited close to the timeout, waited {:?}",
@@ -172,6 +252,26 @@ mod tests {
         let recovered = RepoLock::acquire_blocking("waiter", Duration::from_millis(300));
         assert!(recovered.is_ok(), "should acquire once the holder releases");
         drop(recovered);
+
+        central_repo::set_test_base_dir_override(None);
+    }
+
+    /// Install flows get a much larger wait budget than regular foreground
+    /// operations (see `INSTALL_WAIT`); uncontended acquisition must still
+    /// succeed immediately rather than pay any fixed cost.
+    #[test]
+    fn install_acquire_is_immediate_when_uncontended() {
+        let _guard = central_repo::test_base_dir_lock();
+        let tmp = tempdir().unwrap();
+        central_repo::set_test_base_dir_override(Some(tmp.path().join("base")));
+
+        let start = Instant::now();
+        let lock = RepoLock::acquire_install("install local skill").unwrap();
+        assert!(
+            start.elapsed() < Duration::from_secs(5),
+            "uncontended install acquire should be immediate"
+        );
+        drop(lock);
 
         central_repo::set_test_base_dir_override(None);
     }

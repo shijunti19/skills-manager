@@ -725,7 +725,7 @@ pub async fn install_local(
                 update_status: "local_only".to_string(),
             };
             let _lock =
-                RepoLock::acquire_foreground("install local skill").map_err(AppError::db)?;
+                RepoLock::acquire_install("install local skill").map_err(AppError::db)?;
             let result =
                 installer::install_from_local(&path, name.as_deref()).map_err(AppError::io)?;
             let skill_name = result.name.clone();
@@ -799,7 +799,7 @@ pub async fn install_git(
             emit_progress("installing");
             let install_result = (|| -> Result<(String, String), AppError> {
                 let _lock =
-                    RepoLock::acquire_foreground("install git skill").map_err(AppError::db)?;
+                    RepoLock::acquire_install("install git skill").map_err(AppError::db)?;
                 let skill_dir = resolve_skill_dir(&temp_dir, parsed.subpath.as_deref(), None)?;
                 let revision = git_fetcher::get_head_revision(&temp_dir).map_err(AppError::git)?;
                 let result = installer::install_from_git_dir(&skill_dir, name.as_deref())
@@ -891,7 +891,7 @@ pub async fn install_from_skillssh(
             emit_progress("installing");
             let install_result = (|| -> Result<(String, String), AppError> {
                 let _lock =
-                    RepoLock::acquire_foreground("install skillssh skill").map_err(AppError::db)?;
+                    RepoLock::acquire_install("install skillssh skill").map_err(AppError::db)?;
                 let skill_dir = resolve_skill_dir(&temp_dir, None, Some(&skill_id))?;
                 let revision = git_fetcher::get_head_revision(&temp_dir).map_err(AppError::git)?;
                 let source_ref = format!("{}/{}", source, skill_id);
@@ -1044,7 +1044,7 @@ pub async fn confirm_git_install(
             let all_dirs = collect_git_skill_dirs(&skill_dir);
             let revision = git_fetcher::get_head_revision(&temp_path).map_err(AppError::git)?;
             let _lock =
-                RepoLock::acquire_foreground("confirm git install").map_err(AppError::db)?;
+                RepoLock::acquire_install("confirm git install").map_err(AppError::db)?;
 
             for dir in &all_dirs {
                 let rel_key = skill_rel_key(&skill_dir, dir);
