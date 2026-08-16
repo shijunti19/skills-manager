@@ -11,6 +11,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 _Nothing yet._
 
 ### User-facing
+_Nothing yet._
+
+### Developer & Governance
+_Nothing yet._
+
+## [1.33.3] - 2026-08-17
+
+### Release Overview
+_Nothing yet._
+
+### User-facing
 - **Releases now publish even from forks without Apple signing credentials** — The macOS build legs and the updater-asset validation hard-required Developer ID signing + notarization secrets, so on any fork without those secrets both macOS legs failed and the release (including the already-built Windows and Linux assets) was never published. The macOS legs are now skipped when `APPLE_CERTIFICATE` is absent and the validation drops its macOS assertions accordingly; with the secrets configured, behaviour is unchanged.
 
 ### Developer & Governance
