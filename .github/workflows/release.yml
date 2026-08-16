@@ -11,53 +11,45 @@ permissions:
 
 jobs:
   # Job-level `if` cannot read the matrix or secrets contexts, so the signing
-  # availability is detected once here and consumed via `needs` outputs by the
-  # build matrix (skip macOS legs) and the asset validation (drop macOS
-  # assertions).
+  # availability is detected once here and consumed via `needs` outputs: the
+  # build matrix simply omits the macOS entries (they cannot sign or
+  # notarize without the secrets, and the signing-prep/verify steps would
+  # hard-fail, blocking the whole release), and the asset validation drops
+  # its macOS assertions to match. With the secrets configured the matrix is
+  # the full four-platform set and behaviour is unchanged.
   detect-signing:
     runs-on: ubuntu-latest
     name: Detect Apple signing secrets
     outputs:
       apple: ${{ steps.detect.outputs.apple }}
+      matrix: ${{ steps.detect.outputs.matrix }}
     steps:
       - id: detect
         env:
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
         run: |
+          common='[{"platform":"ubuntu-22.04","target":"x86_64-unknown-linux-gnu","label":"Linux-x64"},{"platform":"windows-latest","target":"x86_64-pc-windows-msvc","label":"Windows-x64"}'
+          macos=',{"platform":"macos-latest","target":"aarch64-apple-darwin","label":"macOS-arm64"},{"platform":"macos-latest","target":"x86_64-apple-darwin","label":"macOS-x64"}'
           if [ -n "$APPLE_CERTIFICATE" ]; then
             echo "apple=true" >> "$GITHUB_OUTPUT"
+            echo "matrix=${common}${macos}]" >> "$GITHUB_OUTPUT"
           else
+            echo "Apple signing secrets absent: building Windows and Linux only"
             echo "apple=false" >> "$GITHUB_OUTPUT"
+            echo "matrix=${common}]" >> "$GITHUB_OUTPUT"
           fi
 
   build:
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - platform: macos-latest
-            target: aarch64-apple-darwin
-            label: macOS-arm64
-          - platform: macos-latest
-            target: x86_64-apple-darwin
-            label: macOS-x64
-          - platform: ubuntu-22.04
-            target: x86_64-unknown-linux-gnu
-            label: Linux-x64
-          - platform: windows-latest
-            target: x86_64-pc-windows-msvc
-            label: Windows-x64
+        # Composed by detect-signing: the macOS entries are omitted when the
+        # Apple signing secrets are absent (see that job's comment).
+        include: ${{ fromJson(needs.detect-signing.outputs.matrix) }}
 
     runs-on: ${{ matrix.platform }}
     name: Build (${{ matrix.label }})
     needs: detect-signing
-    # Forks without Apple Developer ID credentials can neither sign nor
-    # notarize: the signing-prep and signature-verify steps hard-fail without
-    # the secrets, which used to block the whole release from publishing even
-    # though the Windows and Linux legs succeeded. Skip the macOS legs there
-    # (verify-updater-assets drops its macOS assertions accordingly); upstream
-    # with the secrets configured is unaffected.
-    if: ${{ !startsWith(matrix.platform, 'macos') || needs.detect-signing.outputs.apple == 'true' }}
     # Apple's notary service can leave a submission "In Progress" indefinitely and
     # `notarytool submit --wait` has no timeout of its own, so v1.29.0 burned the
     # full 6-hour GitHub limit on both macOS legs. The slowest healthy build so far
