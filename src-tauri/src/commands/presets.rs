@@ -717,10 +717,10 @@ mod tests {
         assert!(old_only_target.is_symlink());
         let shared_inode_before = fs::symlink_metadata(&shared_target).unwrap().ino();
 
-        let desired_targets = collect_scenario_sync_targets(&store, "new").unwrap();
-        unsync_obsolete_scenario_targets(&store, "old", &desired_targets).unwrap();
+        let desired_targets = scenario_service::collect_scenario_sync_targets(&store, "new").unwrap();
+        scenario_service::unsync_obsolete_scenario_targets(&store, "old", &desired_targets).unwrap();
         store.set_active_scenario("new").unwrap();
-        sync_desired_targets(&store, &desired_targets).unwrap();
+        scenario_service::sync_desired_targets(&store, &desired_targets).unwrap();
 
         assert_eq!(fs::read_link(&shared_target).unwrap(), shared_dir);
         assert_eq!(

@@ -30,6 +30,13 @@ jobs:
 
     runs-on: ${{ matrix.platform }}
     name: Build (${{ matrix.label }})
+    # Forks without Apple Developer ID credentials can neither sign nor
+    # notarize: the signing-prep and signature-verify steps hard-fail without
+    # the secrets, which used to block the whole release from publishing even
+    # though the Windows and Linux legs succeeded. Skip the macOS legs there
+    # (verify-updater-assets drops its macOS assertions accordingly); upstream
+    # with the secrets configured is unaffected.
+    if: ${{ !startsWith(matrix.platform, 'macos') || secrets.APPLE_CERTIFICATE != '' }}
     # Apple's notary service can leave a submission "In Progress" indefinitely and
     # `notarytool submit --wait` has no timeout of its own, so v1.29.0 burned the
     # full 6-hour GitHub limit on both macOS legs. The slowest healthy build so far
@@ -413,6 +420,10 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
           TAG: ${{ github.ref_name }}
+          # Mirrors the build job's skip condition: when the macOS legs were
+          # skipped for lack of signing secrets, their assets are legitimately
+          # absent and must not fail validation.
+          APPLE_SECRETS_PRESENT: ${{ secrets.APPLE_CERTIFICATE != '' }}
         run: |
           set -euo pipefail
 
@@ -444,11 +455,11 @@ jobs:
           fi
 
           fail=0
-          for cli_asset in \
-            skills-manager-cli-macOS-arm64 \
-            skills-manager-cli-macOS-x64 \
-            skills-manager-cli-Windows-x64.exe \
-            skills-manager-cli-Linux-x64; do
+          cli_assets="skills-manager-cli-Windows-x64.exe skills-manager-cli-Linux-x64"
+          if [ "$APPLE_SECRETS_PRESENT" = "true" ]; then
+            cli_assets="skills-manager-cli-macOS-arm64 skills-manager-cli-macOS-x64 $cli_assets"
+          fi
+          for cli_asset in $cli_assets; do
             if ! echo "$asset_names" | grep -qx "$cli_asset"; then
               echo "Missing CLI release asset: ${cli_asset}" >&2
               fail=1
@@ -464,8 +475,13 @@ jobs:
             "https://api.github.com/repos/${REPO}/releases/assets/${asset_id}" -o /tmp/latest.json
 
           # v1.29.0 published with no darwin entries at all because only Windows
-          # and Linux were asserted here, so every shipped platform is checked now.
-          for platform in darwin-aarch64 darwin-x86_64 windows-x86_64 linux-x86_64; do
+          # and Linux were asserted here, so every shipped platform is checked
+          # now (darwin only when the macOS legs actually ran).
+          platforms="windows-x86_64 linux-x86_64"
+          if [ "$APPLE_SECRETS_PRESENT" = "true" ]; then
+            platforms="darwin-aarch64 darwin-x86_64 $platforms"
+          fi
+          for platform in $platforms; do
             if ! jq -e --arg p "$platform" '.platforms[$p].signature and .platforms[$p].url' /tmp/latest.json >/dev/null; then
               echo "latest.json is missing a signed updater entry for ${platform}" >&2
               fail=1
@@ -473,13 +489,16 @@ jobs:
           done
 
           # A macOS leg that dies during notarization still leaves the release
-          # looking plausible, so require its user-facing artifacts too.
-          for pattern in '\.dmg$' '\.app\.tar\.gz$'; do
-            if ! echo "$asset_names" | grep -qE "$pattern"; then
-              echo "Missing macOS asset matching ${pattern}" >&2
-              fail=1
-            fi
-          done
+          # looking plausible, so require its user-facing artifacts too — but
+          # only when the macOS legs ran at all.
+          if [ "$APPLE_SECRETS_PRESENT" = "true" ]; then
+            for pattern in '\.dmg$' '\.app\.tar\.gz$'; do
+              if ! echo "$asset_names" | grep -qE "$pattern"; then
+                echo "Missing macOS asset matching ${pattern}" >&2
+                fail=1
+              fi
+            done
+          fi
 
           if [ "$fail" -ne 0 ]; then
             echo "--- latest.json ---" >&2

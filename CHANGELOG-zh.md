@@ -11,10 +11,10 @@
 _暂无。_
 
 ### 用户可见更新
-_暂无。_
+- **没有 Apple 签名凭证的 fork 也能正常发版了** —— macOS 构建和产物校验此前硬要求 Developer ID 签名 + 公证密钥，任何没配这些 secret 的 fork 都会两个 macOS 腿全失败，连带已构建好的 Windows/Linux 产物也永远不发布。现在缺少 `APPLE_CERTIFICATE` 时 macOS 腿自动跳过、校验同步放宽 macOS 断言；配了密钥则行为不变。
 
 ### 开发者与治理更新
-_暂无。_
+- **`cargo test` 在 unix 上恢复可编译：`presets.rs` 里 `#[cfg(unix)]` 的场景切换测试裸调用了 `scenario_service` 的函数** —— 这些名字此前只靠 Windows 侧作用域才能解析，带上合并代码后的第一次推送就让 macOS 测试腿编译失败（`cargo check` 不编译测试，所以 Linux check 一直是绿的）。现已改为 `scenario_service::…` 限定调用，与非测试代码的引用方式一致。
 
 ## [1.33.2] - 2026-08-16
 

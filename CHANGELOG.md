@@ -11,10 +11,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 _Nothing yet._
 
 ### User-facing
-_Nothing yet._
+- **Releases now publish even from forks without Apple signing credentials** — The macOS build legs and the updater-asset validation hard-required Developer ID signing + notarization secrets, so on any fork without those secrets both macOS legs failed and the release (including the already-built Windows and Linux assets) was never published. The macOS legs are now skipped when `APPLE_CERTIFICATE` is absent and the validation drops its macOS assertions accordingly; with the secrets configured, behaviour is unchanged.
 
 ### Developer & Governance
-_Nothing yet._
+- **`cargo test` compiles on unix again: the `#[cfg(unix)]` scenario-switch test in `presets.rs` called `scenario_service` helpers bare** — the names only resolved through Windows-only scope, so the macOS test leg failed to compile on the first push that carried the merged code (`cargo check` never builds tests, which is why the Linux check stayed green). The calls are now qualified as `scenario_service::…`, matching how the non-test code references that module.
 
 ## [1.33.2] - 2026-08-16
 
