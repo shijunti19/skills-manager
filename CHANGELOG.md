@@ -11,6 +11,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 _Nothing yet._
 
 ### User-facing
+_Nothing yet._
+
+### Developer & Governance
+_Nothing yet._
+
+## [1.33.2] - 2026-08-16
+
+### Release Overview
+_Nothing yet._
+
+### User-facing
 - **Installing skills no longer fails with "skills repository is busy" while startup work is still running** — On a cold start the background reindex can hold the repository lock for 40–100s, but the install commands only waited 20s before giving up, and a failed confirm-install deleted the cloned preview, so the user's only recourse was to re-clone from scratch. All four install entry points (local folder, git URL, skills.sh, preview confirm) now wait up to 150s for the lock; and when a "busy" error does surface, it names the current lock holder and how long it has been held (e.g. `held by "reindex sync metadata" for 42s, pid 1234`) instead of leaving the user wondering what they are competing with.
 - **Startup skill-update check no longer fails when reindex is still running** — On launch the background reindex can hold the repository lock for several seconds while the 3s-delayed "check all skill updates" round fires. Because the per-skill lock acquire was non-blocking, every skill (e.g. 224) failed instantly with "skills repository is busy" and the whole round was silently abandoned. The batch now waits once up to 20s for the lock to drain before the per-skill loop, and the front-end retries on "busy" with a 5s/15s/30s backoff. Hot-reloading the app mid-round also no longer leaves dangling Tauri callbacks ("Couldn't find callback id") because the effect now tracks a cancellation flag across every await.
 - **Smart tag editor now saves pasted skill bindings on Save** — Typing skill names into the "Bound skills" textarea and clicking Save used to silently bind nothing, because only the "Apply Matches" button moved them into the working set. Save now folds any matched names in the textarea into the binding set before persisting, and warns about unmatched tokens instead of dropping them quietly.

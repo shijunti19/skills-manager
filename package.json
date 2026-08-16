@@ -1,7 +1,7 @@
 {
   "name": "skills-manager",
   "private": true,
-  "version": "1.33.1",
+  "version": "1.33.2",
   "license": "MIT",
   "type": "module",
   "scripts": {
@@ -9,9 +9,7 @@
     "build": "tsc -b && vite build",
     "lint": "eslint .",
     "preview": "vite preview",
-    "release:prepare": "node scripts/prepare-release.mjs prepare",
-    "release:tag": "node scripts/prepare-release.mjs tag",
-    "release:ensure-unreleased": "node scripts/prepare-release.mjs ensure-unreleased",
+    "release:prepare": "node scripts/prepare-release.mjs",
     "tauri": "tauri",
     "tauri:dev": "tauri dev --config src-tauri/tauri.dev.conf.json",
     "tauri:build": "tauri build",

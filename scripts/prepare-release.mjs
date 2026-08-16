@@ -89,7 +89,9 @@ function updateCargoPackageVersion(cargoToml, nextVersion) {
 }
 
 function updateCargoLockVersion(cargoLock, nextVersion) {
-  const packagePattern = /(\[\[package\]\]\nname = "skills-manager"\nversion = ")[^"]+("\n)/;
+  // \r? — the working copy may carry CRLF line endings (core.autocrlf), which
+  // would otherwise make this pattern miss and the script abort.
+  const packagePattern = /(\[\[package\]\]\r?\nname = "skills-manager"\r?\nversion = ")[^"]+("\r?\n)/;
   if (!packagePattern.test(cargoLock)) {
     throw new Error('Missing skills-manager package entry in src-tauri/Cargo.lock');
   }
