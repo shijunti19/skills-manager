@@ -10,6 +10,26 @@ permissions:
   contents: write
 
 jobs:
+  # Job-level `if` cannot read the matrix or secrets contexts, so the signing
+  # availability is detected once here and consumed via `needs` outputs by the
+  # build matrix (skip macOS legs) and the asset validation (drop macOS
+  # assertions).
+  detect-signing:
+    runs-on: ubuntu-latest
+    name: Detect Apple signing secrets
+    outputs:
+      apple: ${{ steps.detect.outputs.apple }}
+    steps:
+      - id: detect
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+        run: |
+          if [ -n "$APPLE_CERTIFICATE" ]; then
+            echo "apple=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "apple=false" >> "$GITHUB_OUTPUT"
+          fi
+
   build:
     strategy:
       fail-fast: false
@@ -30,13 +50,14 @@ jobs:
 
     runs-on: ${{ matrix.platform }}
     name: Build (${{ matrix.label }})
+    needs: detect-signing
     # Forks without Apple Developer ID credentials can neither sign nor
     # notarize: the signing-prep and signature-verify steps hard-fail without
     # the secrets, which used to block the whole release from publishing even
     # though the Windows and Linux legs succeeded. Skip the macOS legs there
     # (verify-updater-assets drops its macOS assertions accordingly); upstream
     # with the secrets configured is unaffected.
-    if: ${{ !startsWith(matrix.platform, 'macos') || secrets.APPLE_CERTIFICATE != '' }}
+    if: ${{ !startsWith(matrix.platform, 'macos') || needs.detect-signing.outputs.apple == 'true' }}
     # Apple's notary service can leave a submission "In Progress" indefinitely and
     # `notarytool submit --wait` has no timeout of its own, so v1.29.0 burned the
     # full 6-hour GitHub limit on both macOS legs. The slowest healthy build so far
@@ -410,7 +431,7 @@ jobs:
             "$CLI_UPLOAD" --clobber
 
   verify-updater-assets:
-    needs: build
+    needs: [build, detect-signing]
     if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
     name: Verify updater assets
@@ -423,7 +444,7 @@ jobs:
           # Mirrors the build job's skip condition: when the macOS legs were
           # skipped for lack of signing secrets, their assets are legitimately
           # absent and must not fail validation.
-          APPLE_SECRETS_PRESENT: ${{ secrets.APPLE_CERTIFICATE != '' }}
+          APPLE_SECRETS_PRESENT: ${{ needs.detect-signing.outputs.apple }}
         run: |
           set -euo pipefail
 
